@@ -1,0 +1,23 @@
+
+services:
+  yape-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yape-monitor-app
+    ports:
+      - "3000:3000"
+    volumes:
+      - yape-data:/app/data
+    environment:
+      - PORT=3000
+      - YAPE_API_KEY=mi_yape_secreto_123         # Modificar para producción
+      - DASHBOARD_USERNAME=admin                 # Modificar para producción
+      - DASHBOARD_PASSWORD=yape1234             # Modificar para producción
+      - JWT_SECRET=super_secreto_token_yape_987  # Modificar para producción
+      - DATABASE_PATH=/app/data/yape_payments.db
+    restart: unless-stopped
+
+volumes:
+  yape-data:
+    driver: local

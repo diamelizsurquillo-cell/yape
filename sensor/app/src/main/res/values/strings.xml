@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Yape Sensor</string>
+    <string name="service_name">Lector de Notificaciones Yape</string>
+</resources>

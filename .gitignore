@@ -1,0 +1,31 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Env files (contienen claves/secretos)
+.env
+**/.env
+
+# Build output
+frontend/dist
+server/public/assets
+server/public/index.html
+
+# Base de datos local
+server/data
+
+# Logs
+npm-debug.log*
+*.log
+
+# Android / Gradle
+sensor/.gradle
+sensor/.idea
+sensor/local.properties
+sensor/**/build
+sensor/**/.cxx
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
