@@ -7,6 +7,7 @@
     "build": "npm run build --prefix frontend"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.1"
+    "@supabase/supabase-js": "^2.49.1",
+    "ws": "^8.21.3"
   }
 }
