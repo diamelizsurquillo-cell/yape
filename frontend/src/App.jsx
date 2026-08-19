@@ -3,13 +3,16 @@ import { io } from 'socket.io-client';
 import { 
   Search, LogOut, CheckCircle, Clock, 
   Coins, Filter, Calendar, RefreshCw, 
-  Smartphone, ShieldAlert, Check, Trash2
+  Smartphone, ShieldAlert, Check, Trash2,
+  Volume2, VolumeX, Volume1, Settings, Play, Sparkles, X
 } from 'lucide-react';
+import { speakPayment, formatAmountToSpeech, playChime } from './utils/soundAlert';
+import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('yape_token') || '');
+  const [token, setToken] = useState(localStorage.getItem('yape_token') || (isSupabaseConfigured ? 'supabase_session' : ''));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -23,14 +26,54 @@ function App() {
   const [endDate, setEndDate] = useState('');
   const [stats, setStats] = useState({ totalToday: 0, pendingCount: 0, validatedCount: 0 });
 
+  // Sound / Voice announcement state
+  const [soundEnabled, setSoundEnabled] = useState(localStorage.getItem('yape_sound_enabled') !== 'false');
+  const [includeSender, setIncludeSender] = useState(localStorage.getItem('yape_sound_sender') === 'true');
+  const [soundVolume, setSoundVolume] = useState(parseFloat(localStorage.getItem('yape_sound_volume') || '1.0'));
+  const [showSoundModal, setShowSoundModal] = useState(false);
+  const [lastAnnouncedId, setLastAnnouncedId] = useState(null);
+
   const socketRef = useRef(null);
+  const soundSettingsRef = useRef({ soundEnabled, includeSender, soundVolume });
+
+  // Keep ref synchronized with state to prevent stale closures in websocket listeners
+  useEffect(() => {
+    soundSettingsRef.current = { soundEnabled, includeSender, soundVolume };
+    localStorage.setItem('yape_sound_enabled', soundEnabled.toString());
+    localStorage.setItem('yape_sound_sender', includeSender.toString());
+    localStorage.setItem('yape_sound_volume', soundVolume.toString());
+  }, [soundEnabled, includeSender, soundVolume]);
+
+  const handleIncomingPayment = (nuevoPago) => {
+    setPayments((prev) => {
+      if (prev.some((p) => p.id === nuevoPago.id)) return prev;
+      return [nuevoPago, ...prev];
+    });
+
+    // 🔊 ANUNCIAR PAGO POR VOZ EN EL PARLANTE
+    const { soundEnabled: isSoundOn, includeSender: withSender, soundVolume: vol } = soundSettingsRef.current;
+    if (isSoundOn) {
+      speakPayment({
+        monto: nuevoPago.monto,
+        remitente: nuevoPago.remitente,
+        soundEnabled: true,
+        includeSender: withSender,
+        volume: vol
+      });
+      setLastAnnouncedId(nuevoPago.id);
+    }
+  };
 
   // Auto-login verify
   useEffect(() => {
     if (token) {
       fetchPayments();
-      // Setup WebSockets
-      setupWebSocket();
+      // Setup Realtime: Supabase or WebSockets
+      if (isSupabaseConfigured && supabase) {
+        setupSupabaseRealtime();
+      } else {
+        setupWebSocket();
+      }
     }
     return () => {
       if (socketRef.current) {
@@ -44,17 +87,40 @@ function App() {
     calculateStats();
   }, [payments]);
 
+  const setupSupabaseRealtime = () => {
+    const channel = supabase
+      .channel('pagos-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'pagos' },
+        (payload) => {
+          handleIncomingPayment(payload.new);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'pagos' },
+        (payload) => {
+          const pagoActualizado = payload.new;
+          setPayments((prev) =>
+            prev.map((p) => (p.id === pagoActualizado.id ? pagoActualizado : p))
+          );
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  };
+
   const setupWebSocket = () => {
     // Intentar conectar con la URL de la API o el origin actual
     const socketHost = import.meta.env.VITE_API_URL || window.location.origin;
     socketRef.current = io(socketHost);
 
     socketRef.current.on('nuevo_pago', (nuevoPago) => {
-      // Prevenir duplicados si llega por websocket y HTTP
-      setPayments((prev) => {
-        if (prev.some((p) => p.id === nuevoPago.id)) return prev;
-        return [nuevoPago, ...prev];
-      });
+      handleIncomingPayment(nuevoPago);
     });
 
     socketRef.current.on('pago_validado', (pagoActualizado) => {
@@ -100,7 +166,22 @@ function App() {
   const fetchPayments = async () => {
     setLoading(true);
     try {
-      // Construir query string de filtros
+      if (isSupabaseConfigured && supabase) {
+        let query = supabase.from('pagos').select('*').order('timestamp', { ascending: false });
+        if (statusFilter !== '') {
+          query = query.eq('validado', parseInt(statusFilter));
+        }
+        if (searchTerm) {
+          query = query.ilike('remitente', `%${searchTerm}%`);
+        }
+        const { data, error } = await query;
+        if (!error && data) {
+          setPayments(data);
+        }
+        return;
+      }
+
+      // Construir query string de filtros para Backend tradicional
       const queryParams = new URLSearchParams();
       if (startDate) queryParams.append('fecha_inicio', startDate);
       if (endDate) queryParams.append('fecha_fin', endDate);
@@ -131,6 +212,24 @@ function App() {
 
   const validatePayment = async (id) => {
     try {
+      if (isSupabaseConfigured && supabase) {
+        const { data, error } = await supabase
+          .from('pagos')
+          .update({
+            validado: 1,
+            fecha_validacion: new Date().toISOString(),
+            usuario_validador: 'admin'
+          })
+          .eq('id', id)
+          .select()
+          .single();
+
+        if (!error && data) {
+          setPayments((prev) => prev.map((p) => (p.id === id ? data : p)));
+        }
+        return;
+      }
+
       const res = await fetch(`${API_URL}/api/pagos/${id}/validar`, {
         method: 'PATCH',
         headers: {
@@ -144,8 +243,6 @@ function App() {
       }
       if (res.ok) {
         const data = await res.json();
-        // El estado se actualizará automáticamente a través del evento del WebSocket, 
-        // pero lo actualizamos localmente también para feedback instantáneo si hay retrasos.
         setPayments((prev) => 
           prev.map((p) => (p.id === id ? data.pago : p))
         );
@@ -304,7 +401,39 @@ function App() {
                 Interno
               </span>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
+              {/* Botón Rápido Parlante On/Off */}
+              <button 
+                onClick={() => {
+                  const newState = !soundEnabled;
+                  setSoundEnabled(newState);
+                  if (newState) {
+                    // Test feedback chime when enabled
+                    playChime(soundVolume);
+                  }
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
+                  soundEnabled 
+                    ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400' 
+                    : 'bg-red-500/90 hover:bg-red-600 text-white border-red-400'
+                }`}
+                title={soundEnabled ? 'Parlante Activado (Clic para silenciar)' : 'Parlante Silenciado (Clic para activar)'}
+              >
+                {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                <span className="hidden sm:inline">{soundEnabled ? 'Parlante: ACTIVO' : 'Parlante: MUTED'}</span>
+              </button>
+
+              {/* Botón Configuración de Audio / Probar */}
+              <button 
+                onClick={() => setShowSoundModal(true)}
+                className="p-2 rounded-full hover:bg-white/10 transition text-white"
+                title="Configuración de Voz y Parlante"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+
+              <div className="h-6 w-px bg-white/20"></div>
+
               <button 
                 onClick={fetchPayments}
                 disabled={loading}
@@ -483,7 +612,24 @@ function App() {
                       className={`hover:bg-gray-50 transition duration-150 ${p.validado === 0 ? 'bg-yellow-50/20' : ''}`}
                     >
                       <td className="px-6 py-4 font-semibold text-gray-900">{p.remitente}</td>
-                      <td className="px-6 py-4 font-bold text-yape text-base">S/ {p.monto.toFixed(2)}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-yape text-base">S/ {p.monto.toFixed(2)}</span>
+                          <button
+                            onClick={() => speakPayment({
+                              monto: p.monto,
+                              remitente: p.remitente,
+                              soundEnabled: true,
+                              includeSender,
+                              volume: soundVolume
+                            })}
+                            className="p-1 rounded text-gray-400 hover:text-yape hover:bg-yape/10 transition"
+                            title="Escuchar locución en el parlante"
+                          >
+                            <Volume2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
                       <td className="px-6 py-4 text-gray-500">{formatFecha(p.timestamp)}</td>
                       <td className="px-6 py-4 text-sm font-semibold text-gray-600">
                         {p.codigo_seguridad || '-'}
@@ -523,6 +669,113 @@ function App() {
           </div>
         </div>
       </main>
+
+      {/* Modal de Configuración y Prueba del Parlante */}
+      {showSoundModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-gray-100 relative">
+            <button 
+              onClick={() => setShowSoundModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-yape/10 text-yape flex items-center justify-center">
+                <Volume2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-800">Configuración del Parlante</h3>
+                <p className="text-xs text-gray-500">Anuncios de voz al recibir pagos en tiempo real</p>
+              </div>
+            </div>
+
+            <div className="space-y-4 text-sm text-gray-700">
+              {/* Switch Activar Sonido */}
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+                <div>
+                  <span className="font-semibold block">Voz en Parlante</span>
+                  <span className="text-xs text-gray-500">Decir "¡Yape!" y el monto al llegar un pago</span>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={soundEnabled} 
+                    onChange={(e) => setSoundEnabled(e.target.checked)} 
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yape"></div>
+                </label>
+              </div>
+
+              {/* Switch Incluir Remitente */}
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+                <div>
+                  <span className="font-semibold block">Mencionar Cliente</span>
+                  <span className="text-xs text-gray-500">Ej: "¡Yape! 50 soles de Juan Perez"</span>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={includeSender} 
+                    onChange={(e) => setIncludeSender(e.target.checked)} 
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yape"></div>
+                </label>
+              </div>
+
+              {/* Slider de Volumen */}
+              <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="font-semibold">Volumen de Voz</span>
+                  <span className="text-xs font-bold text-yape">{Math.round(soundVolume * 100)}%</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0.1" 
+                  max="1.0" 
+                  step="0.05"
+                  value={soundVolume}
+                  onChange={(e) => setSoundVolume(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-yape"
+                />
+              </div>
+
+              {/* Botón de Prueba */}
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => speakPayment({
+                    monto: 50.00,
+                    remitente: includeSender ? 'Juan Pérez' : '',
+                    soundEnabled: true,
+                    includeSender,
+                    volume: soundVolume
+                  })}
+                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yape to-yape-dark hover:opacity-95 text-white font-bold py-2.5 px-4 rounded-xl shadow-md transition"
+                >
+                  <Play className="w-4 h-4 fill-white" />
+                  <span>Probar Sonido de Prueba (S/ 50.00)</span>
+                </button>
+                <p className="text-[11px] text-gray-400 text-center mt-2">
+                  🔔 El navegador pronunciará por los altavoces: "{`¡Yape! 50 soles${includeSender ? ' de Juan Pérez' : ''}`}"
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setShowSoundModal(false)}
+                className="bg-gray-800 hover:bg-gray-900 text-white text-xs font-bold py-2 px-5 rounded-lg transition"
+              >
+                Cerrar y Guardar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
