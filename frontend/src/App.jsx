@@ -5,11 +5,12 @@ import {
   Coins, Filter, Calendar, RefreshCw, 
   Smartphone, ShieldAlert, Check, Trash2,
   Volume2, VolumeX, Volume1, Settings, Play, Sparkles, X,
-  Bell, BellRing, BellOff, ExternalLink
+  Bell, BellRing, BellOff, ExternalLink, AppWindow
 } from 'lucide-react';
 import { speakPayment, formatAmountToSpeech, playChime } from './utils/soundAlert';
 import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
 import { requestNotificationPermission, showDesktopNotification } from './utils/desktopNotification';
+import { openYapeFloatingWidget, updateFloatingWidget, isPipSupported } from './utils/pipWidget';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -79,7 +80,10 @@ function App() {
       codigo_seguridad: nuevoPago.codigo_seguridad
     });
 
-    // 📱 3. POPUP FLOTANTE EN LA PARTE INFERIOR DE LA PANTALLA
+    // 🪟 3. ACTUALIZAR MINI-VENTANA FLOTANTE "ALWAYS ON TOP"
+    updateFloatingWidget(nuevoPago);
+
+    // 📱 4. POPUP FLOTANTE EN LA PARTE INFERIOR DE LA PANTALLA
     setActiveToast(nuevoPago);
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
@@ -469,6 +473,20 @@ function App() {
               >
                 {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
                 <span className="hidden md:inline">{desktopNotifications ? 'Alertas: ON' : 'Activar Alertas'}</span>
+              </button>
+
+              {/* Botón Mini-Ventana Flotante Always on Top */}
+              <button 
+                onClick={async () => {
+                  await openYapeFloatingWidget({
+                    onValidatePayment: (id) => validatePayment(id)
+                  });
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-blue-600 hover:bg-blue-700 text-white border-blue-400"
+                title="Abrir Mini-Ventana Flotante SIEMPRE VISIBLE encima de otras aplicaciones (Excel, WhatsApp, etc.)"
+              >
+                <AppWindow className="w-4 h-4" />
+                <span className="hidden lg:inline">Ventana Flotante</span>
               </button>
 
               {/* Botón Configuración de Audio / Probar */}
