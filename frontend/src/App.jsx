@@ -83,9 +83,6 @@ function App() {
     // 🪟 3. ACTUALIZAR MINI-WIDGET FLOTANTE PiP
     updateFloatingWidget(nuevoPago);
 
-    // 🖥️ 4. VENTANA EMERGENTE DE ESCRITORIO (Solo cuando llega el pago)
-    showTemporaryDesktopPopup(nuevoPago);
-
     // 📱 4. POPUP FLOTANTE EN LA PARTE INFERIOR DE LA PANTALLA
     setActiveToast(nuevoPago);
     if (toastTimeoutRef.current) {
