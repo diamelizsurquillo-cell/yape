@@ -1,7 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+let supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+if (supabaseUrl && !supabaseUrl.startsWith('http://') && !supabaseUrl.startsWith('https://')) {
+  supabaseUrl = `https://${supabaseUrl}`;
+}
+supabaseUrl = supabaseUrl.replace(/\/+$/, '');
+
+const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
 
 export default async function handler(req, res) {
   // CORS Headers
@@ -18,7 +23,11 @@ export default async function handler(req, res) {
   }
 
   if (!supabaseUrl || !supabaseKey) {
-    return res.status(500).json({ error: 'Variables de entorno de Supabase no configuradas en Vercel' });
+    return res.status(500).json({ 
+      error: 'Variables de entorno de Supabase no configuradas en Vercel',
+      hasUrl: Boolean(supabaseUrl),
+      hasKey: Boolean(supabaseKey)
+    });
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey);
