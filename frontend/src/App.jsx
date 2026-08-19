@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { 
-  Search, LogOut, CheckCircle, Clock, 
-  Coins, Filter, Calendar, RefreshCw, 
+import {
+  Search, LogOut, CheckCircle, Clock,
+  Coins, Filter, Calendar, RefreshCw,
   Smartphone, ShieldAlert, Check, Trash2,
   Volume2, VolumeX, Volume1, Settings, Play, Sparkles, X,
   Bell, BellRing, BellOff, ExternalLink, AppWindow
@@ -19,7 +19,7 @@ function App() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
-  
+
   // Dashboard State
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -80,8 +80,8 @@ function App() {
       codigo_seguridad: nuevoPago.codigo_seguridad
     });
 
-    // 🪟 3. ACTUALIZAR MINI-VENTANA FLOTANTE "ALWAYS ON TOP"
-    updateFloatingWidget(nuevoPago);
+    // 🪟 3. ABRIR / ACTUALIZAR VENTANA EMERGENTE DE ESCRITORIO TEMPORAL (Solo cuando llega el pago)
+    showTemporaryDesktopPopup(nuevoPago);
 
     // 📱 4. POPUP FLOTANTE EN LA PARTE INFERIOR DE LA PANTALLA
     setActiveToast(nuevoPago);
@@ -153,7 +153,7 @@ function App() {
     });
 
     socketRef.current.on('pago_validado', (pagoActualizado) => {
-      setPayments((prev) => 
+      setPayments((prev) =>
         prev.map((p) => (p.id === pagoActualizado.id ? pagoActualizado : p))
       );
     });
@@ -272,7 +272,7 @@ function App() {
       }
       if (res.ok) {
         const data = await res.json();
-        setPayments((prev) => 
+        setPayments((prev) =>
           prev.map((p) => (p.id === id ? data.pago : p))
         );
       }
@@ -284,7 +284,7 @@ function App() {
   const calculateStats = () => {
     // Filtrar solo los pagos que corresponden al día de hoy para las tarjetas superiores
     const hoy = new Date().toLocaleDateString('es-PE', { timeZone: 'America/Lima' });
-    
+
     const pagosDeHoy = payments.filter(p => {
       // timestamp está en segundos (enviado por android app), multiplicamos por 1000
       const fechaPago = new Date(p.timestamp * 1000).toLocaleDateString('es-PE', { timeZone: 'America/Lima' });
@@ -432,7 +432,7 @@ function App() {
             </div>
             <div className="flex items-center gap-3">
               {/* Botón Rápido Parlante On/Off */}
-              <button 
+              <button
                 onClick={() => {
                   const newState = !soundEnabled;
                   setSoundEnabled(newState);
@@ -440,11 +440,10 @@ function App() {
                     playChime(soundVolume);
                   }
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
-                  soundEnabled 
-                    ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400' 
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${soundEnabled
+                    ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400'
                     : 'bg-red-500/90 hover:bg-red-600 text-white border-red-400'
-                }`}
+                  }`}
                 title={soundEnabled ? 'Parlante Activado (Clic para silenciar)' : 'Parlante Silenciado (Clic para activar)'}
               >
                 {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
@@ -452,7 +451,7 @@ function App() {
               </button>
 
               {/* Botón Notificaciones en Segundo Plano / Escritorio */}
-              <button 
+              <button
                 onClick={async () => {
                   const perm = await requestNotificationPermission();
                   setDesktopNotifications(perm === 'granted');
@@ -464,11 +463,10 @@ function App() {
                     });
                   }
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
-                  desktopNotifications 
-                    ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400' 
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${desktopNotifications
+                    ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400'
                     : 'bg-amber-500/90 hover:bg-amber-600 text-white border-amber-300'
-                }`}
+                  }`}
                 title={desktopNotifications ? 'Notificaciones en segundo plano activadas' : 'Activar alertas en segundo plano (otra ventana/app)'}
               >
                 {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
@@ -476,7 +474,7 @@ function App() {
               </button>
 
               {/* Botón Mini-Ventana Flotante Always on Top */}
-              <button 
+              <button
                 onClick={async () => {
                   await openYapeFloatingWidget({
                     onValidatePayment: (id) => validatePayment(id)
@@ -490,7 +488,7 @@ function App() {
               </button>
 
               {/* Botón Configuración de Audio / Probar */}
-              <button 
+              <button
                 onClick={() => setShowSoundModal(true)}
                 className="p-2 rounded-full hover:bg-white/10 transition text-white"
                 title="Configuración de Voz y Notificaciones"
@@ -500,7 +498,7 @@ function App() {
 
               <div className="h-6 w-px bg-white/20"></div>
 
-              <button 
+              <button
                 onClick={fetchPayments}
                 disabled={loading}
                 className="p-2 rounded-full hover:bg-white/10 transition text-white"
@@ -508,7 +506,7 @@ function App() {
               >
                 <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
               </button>
-              <button 
+              <button
                 onClick={clearAllPayments}
                 className="p-2 rounded-full hover:bg-red-500/30 transition text-white"
                 title="Limpiar Todo el Historial"
@@ -530,7 +528,7 @@ function App() {
 
       {/* Cuerpo Principal */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
-        
+
         {/* Contadores / Tarjetas de Resumen (Del día de hoy) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           {/* Card Total Hoy */}
@@ -673,8 +671,8 @@ function App() {
                   </tr>
                 ) : (
                   payments.map((p) => (
-                    <tr 
-                      key={p.id} 
+                    <tr
+                      key={p.id}
                       className={`hover:bg-gray-50 transition duration-150 ${p.validado === 0 ? 'bg-yellow-50/20' : ''}`}
                     >
                       <td className="px-6 py-4 font-semibold text-gray-900">{p.remitente}</td>
@@ -740,7 +738,7 @@ function App() {
       {showSoundModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-gray-100 relative">
-            <button 
+            <button
               onClick={() => setShowSoundModal(false)}
               className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"
             >
@@ -765,10 +763,10 @@ function App() {
                   <span className="text-xs text-gray-500">Decir "¡Yape!" y el monto al llegar un pago</span>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={soundEnabled} 
-                    onChange={(e) => setSoundEnabled(e.target.checked)} 
+                  <input
+                    type="checkbox"
+                    checked={soundEnabled}
+                    onChange={(e) => setSoundEnabled(e.target.checked)}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yape"></div>
@@ -782,10 +780,10 @@ function App() {
                   <span className="text-xs text-gray-500">Ej: "¡Yape! 50 soles de Juan Perez"</span>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={includeSender} 
-                    onChange={(e) => setIncludeSender(e.target.checked)} 
+                  <input
+                    type="checkbox"
+                    checked={includeSender}
+                    onChange={(e) => setIncludeSender(e.target.checked)}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yape"></div>
@@ -798,10 +796,10 @@ function App() {
                   <span className="font-semibold">Volumen de Voz</span>
                   <span className="text-xs font-bold text-yape">{Math.round(soundVolume * 100)}%</span>
                 </div>
-                <input 
-                  type="range" 
-                  min="0.1" 
-                  max="1.0" 
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1.0"
                   step="0.05"
                   value={soundVolume}
                   onChange={(e) => setSoundVolume(parseFloat(e.target.value))}
@@ -829,11 +827,10 @@ function App() {
                       });
                     }
                   }}
-                  className={`text-xs font-bold px-3 py-1.5 rounded-lg transition ${
-                    desktopNotifications 
-                      ? 'bg-purple-700 text-white hover:bg-purple-800' 
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg transition ${desktopNotifications
+                      ? 'bg-purple-700 text-white hover:bg-purple-800'
                       : 'bg-yape text-white hover:bg-yape-dark'
-                  }`}
+                    }`}
                 >
                   {desktopNotifications ? 'Permitido (ON)' : 'Activar Permiso'}
                 </button>
