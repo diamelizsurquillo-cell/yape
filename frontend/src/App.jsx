@@ -4,10 +4,12 @@ import {
   Search, LogOut, CheckCircle, Clock, 
   Coins, Filter, Calendar, RefreshCw, 
   Smartphone, ShieldAlert, Check, Trash2,
-  Volume2, VolumeX, Volume1, Settings, Play, Sparkles, X
+  Volume2, VolumeX, Volume1, Settings, Play, Sparkles, X,
+  Bell, BellRing, BellOff, ExternalLink
 } from 'lucide-react';
 import { speakPayment, formatAmountToSpeech, playChime } from './utils/soundAlert';
 import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
+import { requestNotificationPermission, showDesktopNotification } from './utils/desktopNotification';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -33,6 +35,13 @@ function App() {
   const [showSoundModal, setShowSoundModal] = useState(false);
   const [lastAnnouncedId, setLastAnnouncedId] = useState(null);
 
+  // Desktop Background Notifications & Floating Toast
+  const [desktopNotifications, setDesktopNotifications] = useState(
+    typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
+  );
+  const [activeToast, setActiveToast] = useState(null);
+  const toastTimeoutRef = useRef(null);
+
   const socketRef = useRef(null);
   const soundSettingsRef = useRef({ soundEnabled, includeSender, soundVolume });
 
@@ -50,7 +59,7 @@ function App() {
       return [nuevoPago, ...prev];
     });
 
-    // 🔊 ANUNCIAR PAGO POR VOZ EN EL PARLANTE
+    // 🔊 1. ANUNCIAR PAGO POR VOZ EN EL PARLANTE
     const { soundEnabled: isSoundOn, includeSender: withSender, soundVolume: vol } = soundSettingsRef.current;
     if (isSoundOn) {
       speakPayment({
@@ -62,6 +71,22 @@ function App() {
       });
       setLastAnnouncedId(nuevoPago.id);
     }
+
+    // 🔔 2. NOTIFICACIÓN DE ESCRITORIO / SEGUNDO PLANO (Aparece sobre otras apps o pestañas)
+    showDesktopNotification({
+      monto: nuevoPago.monto,
+      remitente: nuevoPago.remitente,
+      codigo_seguridad: nuevoPago.codigo_seguridad
+    });
+
+    // 📱 3. POPUP FLOTANTE EN LA PARTE INFERIOR DE LA PANTALLA
+    setActiveToast(nuevoPago);
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = setTimeout(() => {
+      setActiveToast(null);
+    }, 8000);
   };
 
   // Auto-login verify
@@ -408,7 +433,6 @@ function App() {
                   const newState = !soundEnabled;
                   setSoundEnabled(newState);
                   if (newState) {
-                    // Test feedback chime when enabled
                     playChime(soundVolume);
                   }
                 }}
@@ -420,14 +444,38 @@ function App() {
                 title={soundEnabled ? 'Parlante Activado (Clic para silenciar)' : 'Parlante Silenciado (Clic para activar)'}
               >
                 {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-                <span className="hidden sm:inline">{soundEnabled ? 'Parlante: ACTIVO' : 'Parlante: MUTED'}</span>
+                <span className="hidden sm:inline">{soundEnabled ? 'Parlante: ON' : 'Parlante: MUTED'}</span>
+              </button>
+
+              {/* Botón Notificaciones en Segundo Plano / Escritorio */}
+              <button 
+                onClick={async () => {
+                  const perm = await requestNotificationPermission();
+                  setDesktopNotifications(perm === 'granted');
+                  if (perm === 'granted') {
+                    showDesktopNotification({
+                      monto: 50,
+                      remitente: 'Cliente de Prueba',
+                      codigo_seguridad: '999'
+                    });
+                  }
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
+                  desktopNotifications 
+                    ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400' 
+                    : 'bg-amber-500/90 hover:bg-amber-600 text-white border-amber-300'
+                }`}
+                title={desktopNotifications ? 'Notificaciones en segundo plano activadas' : 'Activar alertas en segundo plano (otra ventana/app)'}
+              >
+                {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                <span className="hidden md:inline">{desktopNotifications ? 'Alertas: ON' : 'Activar Alertas'}</span>
               </button>
 
               {/* Botón Configuración de Audio / Probar */}
               <button 
                 onClick={() => setShowSoundModal(true)}
                 className="p-2 rounded-full hover:bg-white/10 transition text-white"
-                title="Configuración de Voz y Parlante"
+                title="Configuración de Voz y Notificaciones"
               >
                 <Settings className="w-5 h-5" />
               </button>
@@ -743,24 +791,67 @@ function App() {
                 />
               </div>
 
-              {/* Botón de Prueba */}
-              <div className="pt-2">
+              {/* Switch Notificaciones de Escritorio / Segundo Plano */}
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+                <div>
+                  <span className="font-semibold block">Alertas en Segundo Plano</span>
+                  <span className="text-xs text-gray-500">Aparecer en Windows / Mac incluso en otra ventana</span>
+                </div>
                 <button
                   type="button"
-                  onClick={() => speakPayment({
-                    monto: 50.00,
-                    remitente: includeSender ? 'Juan Pérez' : '',
-                    soundEnabled: true,
-                    includeSender,
-                    volume: soundVolume
-                  })}
+                  onClick={async () => {
+                    const perm = await requestNotificationPermission();
+                    const isGranted = perm === 'granted';
+                    setDesktopNotifications(isGranted);
+                    if (isGranted) {
+                      showDesktopNotification({
+                        monto: 50,
+                        remitente: 'Cliente de Prueba',
+                        codigo_seguridad: '999'
+                      });
+                    }
+                  }}
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg transition ${
+                    desktopNotifications 
+                      ? 'bg-purple-700 text-white hover:bg-purple-800' 
+                      : 'bg-yape text-white hover:bg-yape-dark'
+                  }`}
+                >
+                  {desktopNotifications ? 'Permitido (ON)' : 'Activar Permiso'}
+                </button>
+              </div>
+
+              {/* Botón de Prueba */}
+              <div className="pt-2 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    speakPayment({
+                      monto: 50.00,
+                      remitente: includeSender ? 'Juan Pérez' : '',
+                      soundEnabled: true,
+                      includeSender,
+                      volume: soundVolume
+                    });
+                    showDesktopNotification({
+                      monto: 50.00,
+                      remitente: includeSender ? 'Juan Pérez' : '',
+                      codigo_seguridad: '123'
+                    });
+                    setActiveToast({
+                      id: 999,
+                      monto: 50.00,
+                      remitente: 'Juan Pérez (Prueba)',
+                      codigo_seguridad: '123'
+                    });
+                  }}
                   className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yape to-yape-dark hover:opacity-95 text-white font-bold py-2.5 px-4 rounded-xl shadow-md transition"
                 >
                   <Play className="w-4 h-4 fill-white" />
-                  <span>Probar Sonido de Prueba (S/ 50.00)</span>
+                  <span>Probar Notificación y Voz Completa (S/ 50.00)</span>
                 </button>
-                <p className="text-[11px] text-gray-400 text-center mt-2">
-                  🔔 El navegador pronunciará por los altavoces: "{`¡Yape! 50 soles${includeSender ? ' de Juan Pérez' : ''}`}"
+                <p className="text-[11px] text-gray-400 text-center">
+                  🔔 Suena campana, habla por parlante y muestra la ventana flotante en pantalla y segundo plano.
                 </p>
               </div>
             </div>
@@ -773,6 +864,58 @@ function App() {
                 Cerrar y Guardar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ventana / Banner Flotante de Notificación en la parte inferior */}
+      {activeToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border-2 border-yape p-4 transition-all duration-300 transform translate-y-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-yape to-yape-light text-white flex items-center justify-center flex-shrink-0 shadow-md">
+                <Coins className="w-7 h-7" />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
+                  <span className="text-xs font-bold text-yape uppercase tracking-wider">¡Yape Recibido!</span>
+                </div>
+                <h4 className="text-2xl font-black text-gray-900 mt-0.5">
+                  S/ {Number(activeToast.monto).toFixed(2)}
+                </h4>
+                <p className="text-xs font-semibold text-gray-600 truncate max-w-[180px]">
+                  {activeToast.remitente || 'Cliente'}
+                </p>
+                {activeToast.codigo_seguridad && (
+                  <span className="inline-block text-[10px] font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded mt-1">
+                    Cód: {activeToast.codigo_seguridad}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setActiveToast(null)}
+              className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"
+              title="Cerrar notificación"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between">
+            <span className="text-[11px] text-gray-400">Hace unos segundos</span>
+            <button
+              onClick={() => {
+                validatePayment(activeToast.id);
+                setActiveToast(null);
+              }}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1 rounded-lg transition flex items-center gap-1 shadow-sm"
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>Validar Pago</span>
+            </button>
           </div>
         </div>
       )}
