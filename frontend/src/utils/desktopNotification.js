@@ -1,20 +1,26 @@
-// Utilidad para notificaciones nativas de escritorio del navegador (Windows / Mac / Linux)
+// Utilidad de notificaciones nativas para Windows / Mac / Linux (Chrome, Edge, Firefox, Brave)
+
+// Registrar Service Worker automáticamente si el navegador lo soporta
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch((err) => {
+    console.warn('No se pudo registrar ServiceWorker para notificaciones:', err);
+  });
+}
 
 /**
- * Solicita permiso al usuario para mostrar notificaciones de escritorio en segundo plano.
+ * Solicita permiso de notificaciones de escritorio al usuario.
  */
 export async function requestNotificationPermission() {
   if (!('Notification' in window)) {
-    console.warn('Este navegador no soporta notificaciones de escritorio');
+    alert('Tu navegador no soporta notificaciones de escritorio. Te recomendamos usar Google Chrome o Microsoft Edge.');
     return 'unsupported';
-  }
-  
-  if (Notification.permission === 'granted') {
-    return 'granted';
   }
 
   try {
     const permission = await Notification.requestPermission();
+    if (permission === 'denied') {
+      alert('Las notificaciones están bloqueadas en tu navegador. Haz clic en el icono del candado 🔒 junto a la URL en la barra de direcciones y cambia Notificaciones a "Permitir".');
+    }
     return permission;
   } catch (err) {
     console.error('Error al solicitar permiso de notificaciones:', err);
@@ -23,42 +29,51 @@ export async function requestNotificationPermission() {
 }
 
 /**
- * Muestra una notificación flotante de Windows / Sistema en segundo plano,
- * visible incluso si el usuario está en otra pestaña, programa o aplicación.
+ * Dispara una notificación de escritorio nativa de Windows que se muestra
+ * aunque el navegador esté minimizado, en segundo plano o en otra ventana.
  */
-export function showDesktopNotification({ monto, remitente, codigo_seguridad }) {
+export async function showDesktopNotification({ monto, remitente, codigo_seguridad }) {
   if (!('Notification' in window) || Notification.permission !== 'granted') {
     return;
   }
 
+  const formattedAmount = Number(monto || 0).toFixed(2);
+  const title = `💰 ¡YAPE RECIBIDO: S/ ${formattedAmount}!`;
+  let bodyText = `Cliente: ${remitente || 'No especificado'}`;
+  if (codigo_seguridad) {
+    bodyText += ` | Código: ${codigo_seguridad}`;
+  }
+
+  const options = {
+    body: bodyText,
+    icon: 'https://img.icons8.com/color/96/000000/yape.png',
+    badge: 'https://img.icons8.com/color/96/000000/yape.png',
+    tag: `yape-payment-${Date.now()}`,
+    renotify: true,
+    requireInteraction: true, // Mantener visible en Windows hasta que el usuario interactúe
+    silent: true // La voz del parlante ya reproduce el audio
+  };
+
   try {
-    const formattedAmount = Number(monto || 0).toFixed(2);
-    const title = `🔔 ¡Yape Recibido: S/ ${formattedAmount}!`;
-    let body = `Cliente: ${remitente || 'No especificado'}`;
-    if (codigo_seguridad) {
-      body += ` | Cód: ${codigo_seguridad}`;
+    // 1. Intentar mediante Service Worker (el método más confiable para Windows en segundo plano)
+    if ('serviceWorker' in navigator) {
+      const registration = await navigator.serviceWorker.ready;
+      if (registration && registration.showNotification) {
+        await registration.showNotification(title, options);
+        return;
+      }
     }
 
-    const notification = new Notification(title, {
-      body: body,
-      icon: 'https://img.icons8.com/color/96/000000/yape.png',
-      tag: `yape-pago-${Date.now()}`,
-      requireInteraction: false,
-      silent: true // La voz y la campana ya emiten el sonido
-    });
-
+    // 2. Fallback estándar si no hay Service Worker activo
+    const notification = new Notification(title, options);
     notification.onclick = () => {
       window.focus();
       notification.close();
     };
-
-    // Cerrar automáticamente después de 10 segundos
-    setTimeout(() => {
-      try {
-        notification.close();
-      } catch (e) {}
-    }, 10000);
   } catch (err) {
-    console.warn('Error al mostrar notificación de escritorio:', err);
+    console.warn('Error al mostrar notificación nativa:', err);
+    try {
+      new Notification(title, options);
+    } catch (e) {}
   }
 }
