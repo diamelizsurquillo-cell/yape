@@ -55,7 +55,17 @@ function App() {
     localStorage.setItem('yape_sound_volume', soundVolume.toString());
   }, [soundEnabled, includeSender, soundVolume]);
 
-  const handleIncomingPayment = (nuevoPago) => {
+  const handleIncomingPayment = (rawPago) => {
+    // Inferir banco si la columna no existe en Supabase aún
+    const nuevoPago = { ...rawPago };
+    if (!nuevoPago.banco) {
+      const cod = (nuevoPago.codigo_seguridad || '').toUpperCase();
+      const rem = nuevoPago.remitente || '';
+      const isBbva = cod === 'BBVA' || cod.includes('QR-BBVA') || cod.includes('QR BBVA')
+        || (cod === '' && rem === rem.toUpperCase() && rem.length > 5 && /^[A-ZÁÉÍÓÚÑ\s]+$/.test(rem));
+      nuevoPago.banco = isBbva ? 'BBVA' : 'YAPE';
+    }
+
     setPayments((prev) => {
       if (prev.some((p) => p.id === nuevoPago.id)) return prev;
       return [nuevoPago, ...prev];
@@ -223,7 +233,16 @@ function App() {
         }
         const { data, error } = await query;
         if (!error && data) {
-          setPayments(data);
+          // Inferir banco si la columna no existe en Supabase aún
+          const enriched = data.map(p => {
+            if (p.banco) return p;
+            const cod = (p.codigo_seguridad || '').toUpperCase();
+            const rem = p.remitente || '';
+            const isBbva = cod === 'BBVA' || cod.includes('QR-BBVA') || cod.includes('QR BBVA')
+              || (cod === '' && rem === rem.toUpperCase() && rem.length > 5 && /^[A-ZÁÉÍÓÚÑ\s]+$/.test(rem));
+            return { ...p, banco: isBbva ? 'BBVA' : 'YAPE' };
+          });
+          setPayments(enriched);
         }
         return;
       }

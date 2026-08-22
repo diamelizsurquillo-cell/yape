@@ -57,11 +57,12 @@ export default async function handler(req, res) {
     }
 
     const bankName = (banco || 'YAPE').toUpperCase();
+    const codSeguridad = codigo_seguridad || (bankName === 'BBVA' ? 'BBVA' : null);
     const payload = {
       remitente,
       monto: parseFloat(monto),
       timestamp: parseInt(timestamp),
-      codigo_seguridad: codigo_seguridad || null,
+      codigo_seguridad: codSeguridad,
       banco: bankName,
       validado: 0
     };
@@ -78,7 +79,7 @@ export default async function handler(req, res) {
         remitente,
         monto: parseFloat(monto),
         timestamp: parseInt(timestamp),
-        codigo_seguridad: codigo_seguridad || null,
+        codigo_seguridad: codSeguridad,
         validado: 0
       };
       const retry = await supabase.from('pagos').insert([fallbackPayload]).select().single();
@@ -107,7 +108,18 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: error.message });
     }
 
-    return res.status(200).json(data);
+    // Si la tabla aún no tiene columna 'banco', inferirlo de los datos existentes
+    const enriched = (data || []).map(p => {
+      if (p.banco) return p; // Ya tiene la columna
+      // Inferir: si codigo_seguridad contiene 'BBVA' o 'QR', o es null con remitente TODO MAYÚSCULAS sin código Yape
+      const cod = (p.codigo_seguridad || '').toUpperCase();
+      const rem = p.remitente || '';
+      const isBbva = cod === 'BBVA' || cod.includes('QR-BBVA') || cod.includes('QR BBVA')
+        || (cod === '' && rem === rem.toUpperCase() && rem.length > 5 && /^[A-ZÁÉÍÓÚÑ\s]+$/.test(rem));
+      return { ...p, banco: isBbva ? 'BBVA' : 'YAPE' };
+    });
+
+    return res.status(200).json(enriched);
   }
 
   // 3. LIMPIAR O BORRAR HISTORIAL DE PAGOS
