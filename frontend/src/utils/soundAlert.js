@@ -78,6 +78,7 @@ export function playChime(volume = 1) {
 export function speakPayment({ 
   monto, 
   remitente = '', 
+  banco = 'YAPE',
   soundEnabled = true, 
   includeSender = false, 
   volume = 1,
@@ -92,8 +93,9 @@ export function speakPayment({
   // Reproducir chime primero
   playChime(volume);
 
+  const isBbva = (banco || '').toUpperCase() === 'BBVA';
   const amountText = formatAmountToSpeech(monto);
-  let phrase = `¡Yape! ${amountText}`;
+  let phrase = isBbva ? `¡BBVA! ${amountText}` : `¡Yape! ${amountText}`;
   if (includeSender && remitente) {
     phrase += ` de ${remitente}`;
   }

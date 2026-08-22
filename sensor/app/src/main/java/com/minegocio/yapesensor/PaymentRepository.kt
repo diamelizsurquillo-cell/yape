@@ -28,22 +28,23 @@ class PaymentRepository(private val context: Context) {
      * Intenta subir el pago inmediatamente. Si tiene éxito, no se encola.
      * Si falla de red o de servidor, lo guarda en Room como pendiente y arranca el Worker.
      */
-    suspend fun saveAndUploadPayment(remitente: String, monto: Double, timestamp: Long, codigoSeguridad: String?) {
-        val success = tryUploadDirectly(remitente, monto, timestamp, codigoSeguridad)
+    suspend fun saveAndUploadPayment(remitente: String, monto: Double, timestamp: Long, codigoSeguridad: String?, banco: String = "YAPE") {
+        val success = tryUploadDirectly(remitente, monto, timestamp, codigoSeguridad, banco)
         if (!success) {
             Log.w(TAG, "El envío directo falló. Encolando pago en la base de datos local para reintento automático.")
             val payment = PendingPayment(
                 remitente = remitente,
                 monto = monto,
                 timestamp = timestamp,
-                codigoSeguridad = codigoSeguridad
+                codigoSeguridad = codigoSeguridad,
+                banco = banco
             )
             db.pendingPaymentDao().insert(payment)
             triggerUpload()
         }
     }
 
-    private suspend fun tryUploadDirectly(remitente: String, monto: Double, timestamp: Long, codigoSeguridad: String?): Boolean {
+    private suspend fun tryUploadDirectly(remitente: String, monto: Double, timestamp: Long, codigoSeguridad: String?, banco: String = "YAPE"): Boolean {
         return withContext(Dispatchers.IO) {
             val backendUrl = prefs.getBackendUrl()
             val apiKey = prefs.getApiKey()
@@ -61,6 +62,8 @@ class PaymentRepository(private val context: Context) {
                 targetUrl = if (targetUrl.endsWith("/")) "${targetUrl}api/pagos" else "$targetUrl/api/pagos"
             }
 
+            DiagnosticLogger.log("🌐 Conectando a $targetUrl para registrar $banco S/ $monto...")
+
             try {
                 val mediaType = "application/json; charset=utf-8".toMediaType()
                 val json = JsonObject().apply {
@@ -68,6 +71,7 @@ class PaymentRepository(private val context: Context) {
                     addProperty("monto", monto)
                     addProperty("timestamp", timestamp / 1000) // Convertir a segundos
                     addProperty("codigo_seguridad", codigoSeguridad ?: "")
+                    addProperty("banco", banco)
                 }
 
                 val body = json.toString().toRequestBody(mediaType)
@@ -80,14 +84,18 @@ class PaymentRepository(private val context: Context) {
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
                         Log.i(TAG, "Pago enviado exitosamente al backend de manera directa.")
+                        DiagnosticLogger.log("🚀 ¡ÉXITO! Pago registrado en el servidor (HTTP ${response.code})")
                         true
                     } else {
+                        val errBody = response.body?.string() ?: ""
                         Log.e(TAG, "Error de servidor al subir pago directamente: Código ${response.code}")
+                        DiagnosticLogger.log("❌ Error del servidor: HTTP ${response.code} ($errBody)")
                         false
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Fallo de red al enviar pago directamente: ${e.message}")
+                DiagnosticLogger.log("❌ Fallo de conexión: ${e.message}")
                 false
             }
         }

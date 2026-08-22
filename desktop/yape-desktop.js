@@ -19,19 +19,21 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 
 function showNativeWindowsAlert(payment) {
   const monto = Number(payment.monto || 0).toFixed(2);
-  const remitente = (payment.remitente || 'Cliente Yape').replace(/['"]/g, '');
+  const remitente = (payment.remitente || 'Cliente').replace(/['"]/g, '');
   const codigo = payment.codigo_seguridad || '';
+  const isBbva = (payment.banco || '').toUpperCase() === 'BBVA';
+  const canal = isBbva ? 'BBVA' : 'YAPE';
 
   // Texto para voz
   const soles = Math.floor(payment.monto || 0);
   const centimos = Math.round(((payment.monto || 0) - soles) * 100);
-  let vozTexto = 'Yape! ';
+  let vozTexto = isBbva ? 'BBVA! ' : 'Yape! ';
   if (soles === 1 && centimos === 0) vozTexto += '1 sol';
   else if (soles > 0 && centimos === 0) vozTexto += soles + ' soles';
   else if (soles === 0 && centimos > 0) vozTexto += centimos + ' centimos';
   else vozTexto += soles + ' soles con ' + centimos + ' centimos';
 
-  console.log('[NUEVO PAGO] S/ ' + monto + ' de ' + remitente);
+  console.log(`[NUEVO PAGO ${canal}] S/ ${monto} de ${remitente}`);
 
   // Crear script temporal .ps1 con los datos del pago
   const scriptContent = `
@@ -47,8 +49,8 @@ $synth.Volume = 100
 $synth.SpeakAsync('${vozTexto}')
 
 [System.Windows.Forms.MessageBox]::Show(
-    "Monto: S/ ${monto}\`nCliente: ${remitente}\`nCodigo: ${codigo}",
-    "YAPE RECIBIDO!",
+    "Canal: ${canal}\`nMonto: S/ ${monto}\`nCliente: ${remitente}\`nCodigo: ${codigo}",
+    "${canal} RECIBIDO!",
     [System.Windows.Forms.MessageBoxButtons]::OK,
     [System.Windows.Forms.MessageBoxIcon]::Information,
     [System.Windows.Forms.MessageBoxDefaultButton]::Button1,

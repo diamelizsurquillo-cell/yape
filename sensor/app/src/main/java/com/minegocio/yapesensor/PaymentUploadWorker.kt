@@ -55,6 +55,7 @@ class PaymentUploadWorker(
                     // Timestamp en segundos como es estándar en APIs (o en milisegundos si lo requiere, pero el enunciado dice 1234567890 que es segundos, así que convertimos a segundos dividiendo por 1000)
                     addProperty("timestamp", payment.timestamp / 1000)
                     addProperty("codigo_seguridad", payment.codigoSeguridad ?: "")
+                    addProperty("banco", payment.banco)
                 }
 
                 val body = json.toString().toRequestBody(mediaType)

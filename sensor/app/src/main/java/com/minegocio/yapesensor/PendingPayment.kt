@@ -9,5 +9,6 @@ data class PendingPayment(
     val remitente: String,
     val monto: Double,
     val timestamp: Long,
-    val codigoSeguridad: String?
+    val codigoSeguridad: String?,
+    val banco: String = "YAPE"
 )

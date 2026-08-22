@@ -10,7 +10,9 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,7 +21,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -45,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -61,6 +67,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         preferencesManager = PreferencesManager(applicationContext)
         repository = PaymentRepository(applicationContext)
+        
+        rebindNotificationListener()
 
         setContent {
             MaterialTheme {
@@ -75,11 +83,17 @@ class MainActivity : ComponentActivity() {
                         openSettings = { openNotificationSettings() },
                         openAppDetails = { openAppDetailsSettings() },
                         checkBatteryOptimizations = { isBatteryOptimizationIgnored(this) },
-                        requestBatteryOptimizations = { requestIgnoreBatteryOptimization() }
+                        requestBatteryOptimizations = { requestIgnoreBatteryOptimization() },
+                        rebindService = { rebindNotificationListener() }
                     )
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        rebindNotificationListener()
     }
 
     private fun isNotificationServiceEnabled(context: Context): Boolean {
@@ -97,7 +111,12 @@ class MainActivity : ComponentActivity() {
         return false
     }
 
+    private fun rebindNotificationListener() {
+        YapeNotificationListener.tryRebind(this)
+    }
+
     private fun openNotificationSettings() {
+        rebindNotificationListener()
         try {
             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
             startActivity(intent)
@@ -143,10 +162,12 @@ fun SensorSettingsScreen(
     openSettings: () -> Unit,
     openAppDetails: () -> Unit,
     checkBatteryOptimizations: () -> Boolean,
-    requestBatteryOptimizations: () -> Unit
+    requestBatteryOptimizations: () -> Unit,
+    rebindService: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
 
     var isPermissionGranted by remember { mutableStateOf(false) }
     var isBatteryIgnored by remember { mutableStateOf(false) }
@@ -154,28 +175,30 @@ fun SensorSettingsScreen(
     val savedUrl by preferencesManager.backendUrl.collectAsState(initial = "")
     val savedApiKey by preferencesManager.apiKey.collectAsState(initial = "")
     val dispositivoId by preferencesManager.dispositivoId.collectAsState(initial = "Generando...")
+    
+    val liveLogs by DiagnosticLogger.logs.collectAsState()
+    val isServiceConnected by DiagnosticLogger.isServiceConnected.collectAsState()
 
     var urlInput by remember { mutableStateOf("") }
     var apiKeyInput by remember { mutableStateOf("") }
 
-    // Sincronizar campos al cargar los datos guardados
     LaunchedEffect(savedUrl, savedApiKey) {
         urlInput = savedUrl
         apiKeyInput = savedApiKey
     }
 
-    // Verificar permisos periódicamente cuando la pantalla se enfoca
     LaunchedEffect(Unit) {
         isPermissionGranted = checkPermission()
         isBatteryIgnored = checkBatteryOptimizations()
+        rebindService()
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Yape Sensor - Ajustes", fontWeight = FontWeight.Bold, color = Color.White) },
+                title = { Text("Yape Sensor - Monitor Activo", fontWeight = FontWeight.Bold, color = Color.White) },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF740099) // Color morado característico
+                    containerColor = Color(0xFF740099)
                 )
             )
         }
@@ -184,8 +207,9 @@ fun SensorSettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .verticalScroll(scrollState)
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Card de Estado del Permiso de Notificaciones
             Card(
@@ -204,12 +228,13 @@ fun SensorSettingsScreen(
                         color = if (isPermissionGranted) Color(0xFF2E7D32) else Color(0xFFC62828),
                         fontSize = 15.sp
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = if (isPermissionGranted)
-                            "El sensor está escuchando las notificaciones de Yape y las transmitirá al servidor."
+                            if (isServiceConnected) "🟢 Servicio conectado y escuchando notificaciones de Yape."
+                            else "🟡 Permiso otorgado. Si no detecta, presiona 'Re-activar' para reconectar."
                         else
-                            "Para que la aplicación funcione, debes otorgarle acceso a las notificaciones en el sistema Android.",
+                            "Debes otorgarle acceso a las notificaciones en el sistema Android.",
                         fontSize = 13.sp,
                         color = Color.DarkGray
                     )
@@ -220,10 +245,12 @@ fun SensorSettingsScreen(
                     ) {
                         Button(
                             onClick = {
+                                rebindService()
                                 openSettings()
                                 scope.launch {
                                     kotlinx.coroutines.delay(1000)
                                     isPermissionGranted = checkPermission()
+                                    rebindService()
                                 }
                             },
                             modifier = Modifier.weight(1f),
@@ -232,7 +259,6 @@ fun SensorSettingsScreen(
                             Text(if (isPermissionGranted) "Re-activar Permiso" else "Activar Lector", color = Color.White, fontSize = 12.sp)
                         }
 
-                        // Botón para abrir los detalles de la app en caso de estar bloqueado por ajustes restringidos
                         OutlinedButton(
                             onClick = { openAppDetails() },
                             modifier = Modifier.weight(1f)
@@ -243,7 +269,7 @@ fun SensorSettingsScreen(
                 }
             }
 
-            // Card de Estado de la Batería (Segundo Plano)
+            // Card de Estado de la Batería
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -251,26 +277,23 @@ fun SensorSettingsScreen(
                 )
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
                         text = if (isBatteryIgnored) "OPTIMIZACIÓN DE BATERÍA EXCLUIDA" else "OPTIMIZACIÓN DE BATERÍA DETECTADA",
                         fontWeight = FontWeight.Bold,
                         color = if (isBatteryIgnored) Color(0xFF2E7D32) else Color(0xFFF57F17),
-                        fontSize = 15.sp
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = if (isBatteryIgnored)
-                            "La app puede correr ilimitadamente en segundo plano sin ser cerrada por el sistema."
-                        else
-                            "Xiaomi podría cerrar la app si pasa mucho tiempo inactiva. Activa el modo 'Sin Restricciones'.",
-                        fontSize = 13.sp,
-                        color = Color.DarkGray
+                        fontSize = 14.sp
                     )
                     if (!isBatteryIgnored) {
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Xiaomi podría cerrar el sensor. Activa el modo 'Sin Restricciones'.",
+                            fontSize = 12.sp,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
                         Button(
                             onClick = {
                                 requestBatteryOptimizations()
@@ -287,31 +310,12 @@ fun SensorSettingsScreen(
                 }
             }
 
-            // Card de Identificación de Dispositivo
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("ID del Dispositivo", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text(dispositivoId, fontSize = 11.sp, color = Color.Gray)
-                    }
-                }
-            }
-
             // Formulario de Ajustes
             OutlinedTextField(
                 value = urlInput,
                 onValueChange = { urlInput = it },
                 label = { Text("URL del Backend (POST /api/pagos)") },
-                placeholder = { Text("https://mi-servidor.com") },
+                placeholder = { Text("https://mi-servidor.vercel.app") },
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 singleLine = true
@@ -327,8 +331,6 @@ fun SensorSettingsScreen(
                 singleLine = true
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
             // Botones de Acción
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -341,6 +343,7 @@ fun SensorSettingsScreen(
                             Toast.makeText(context, "Configuración guardada", Toast.LENGTH_SHORT).show()
                             isPermissionGranted = checkPermission()
                             isBatteryIgnored = checkBatteryOptimizations()
+                            rebindService()
                         }
                     },
                     modifier = Modifier.weight(1f),
@@ -352,7 +355,7 @@ fun SensorSettingsScreen(
                 OutlinedButton(
                     onClick = {
                         scope.launch {
-                            // Enviar pago dummy de prueba
+                            DiagnosticLogger.log("🧪 Enviando pago de prueba manual...")
                             repository.saveAndUploadPayment(
                                 remitente = "PAGO DE PRUEBA YAPE",
                                 monto = 1.0,
@@ -365,6 +368,70 @@ fun SensorSettingsScreen(
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("Test Conexión")
+                }
+            }
+
+            // Card de Consola de Diagnóstico en Vivo
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📋 REGISTRO EN VIVO (DIAGNÓSTICO)",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF81C784),
+                            fontSize = 12.sp
+                        )
+                        OutlinedButton(
+                            onClick = { DiagnosticLogger.clear() },
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text("Limpiar", color = Color.White, fontSize = 10.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .background(Color(0xFF121212), RoundedCornerShape(4.dp))
+                            .padding(8.dp)
+                    ) {
+                        if (liveLogs.isEmpty()) {
+                            Text(
+                                text = "Esperando notificaciones de Yape...\n(Cuando llegue un Yape o hagas un Test, verás aquí el paso a paso en tiempo real)",
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        } else {
+                            val scrollLogs = rememberScrollState()
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(scrollLogs)
+                            ) {
+                                liveLogs.forEach { logLine ->
+                                    Text(
+                                        text = logLine,
+                                        color = if (logLine.contains("ERROR") || logLine.contains("❌") || logLine.contains("⚠️")) Color(0xFFFF8A80)
+                                                else if (logLine.contains("ÉXITO") || logLine.contains("✅") || logLine.contains("💰")) Color(0xFFB9F6CA)
+                                                else Color(0xFFE0E0E0),
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        lineHeight = 14.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -29,6 +29,7 @@ async function getDatabaseConnection() {
             monto REAL NOT NULL,
             timestamp INTEGER NOT NULL,
             codigo_seguridad TEXT,
+            banco TEXT DEFAULT 'YAPE',
             validado INTEGER DEFAULT 0,
             fecha_validacion TEXT,
             usuario_validador TEXT,
@@ -36,11 +37,17 @@ async function getDatabaseConnection() {
         );
     `);
 
-    // Migración automática: Agregar columna codigo_seguridad si existe una BD vieja
+    // Migración automática: Agregar columnas si existe una BD vieja
     try {
         await db.exec('ALTER TABLE pagos ADD COLUMN codigo_seguridad TEXT;');
     } catch (e) {
         // La columna ya existe o falló por otra razón aceptable
+    }
+
+    try {
+        await db.exec("ALTER TABLE pagos ADD COLUMN banco TEXT DEFAULT 'YAPE';");
+    } catch (e) {
+        // La columna ya existe
     }
 
     // Crear índice para optimizar búsquedas frecuentes

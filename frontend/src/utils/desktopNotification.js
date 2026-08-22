@@ -32,13 +32,15 @@ export async function requestNotificationPermission() {
  * Dispara una notificación de escritorio nativa de Windows que se muestra
  * aunque el navegador esté minimizado, en segundo plano o en otra ventana.
  */
-export async function showDesktopNotification({ monto, remitente, codigo_seguridad }) {
+export async function showDesktopNotification({ monto, remitente, codigo_seguridad, banco }) {
   if (!('Notification' in window) || Notification.permission !== 'granted') {
     return;
   }
 
+  const isBbva = (banco || '').toUpperCase() === 'BBVA';
+  const canal = isBbva ? 'BBVA' : 'YAPE';
   const formattedAmount = Number(monto || 0).toFixed(2);
-  const title = `💰 ¡YAPE RECIBIDO: S/ ${formattedAmount}!`;
+  const title = isBbva ? `💳 ¡BBVA RECIBIDO: S/ ${formattedAmount}!` : `💰 ¡YAPE RECIBIDO: S/ ${formattedAmount}!`;
   let bodyText = `Cliente: ${remitente || 'No especificado'}`;
   if (codigo_seguridad) {
     bodyText += ` | Código: ${codigo_seguridad}`;
@@ -46,9 +48,13 @@ export async function showDesktopNotification({ monto, remitente, codigo_segurid
 
   const options = {
     body: bodyText,
-    icon: 'https://img.icons8.com/color/96/000000/yape.png',
-    badge: 'https://img.icons8.com/color/96/000000/yape.png',
-    tag: `yape-payment-${Date.now()}`,
+    icon: isBbva 
+      ? 'https://img.icons8.com/color/96/bbva.png' 
+      : 'https://img.icons8.com/color/96/000000/yape.png',
+    badge: isBbva
+      ? 'https://img.icons8.com/color/96/bbva.png'
+      : 'https://img.icons8.com/color/96/000000/yape.png',
+    tag: `payment-${Date.now()}`,
     renotify: true,
     requireInteraction: true, // Mantener visible en Windows hasta que el usuario interactúe
     silent: true // La voz del parlante ya reproduce el audio

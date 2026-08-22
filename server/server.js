@@ -73,11 +73,13 @@ function verifyJwtToken(req, res, next) {
 
 // Endpoint POST /api/pagos (recibe el pago desde la app Android)
 app.post('/api/pagos', verifyApiKey, async (req, res) => {
-    const { remitente, monto, timestamp, codigo_seguridad } = req.body;
+    const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body;
 
     if (!remitente || monto === undefined || !timestamp) {
         return res.status(400).json({ error: 'Campos faltantes en el payload' });
     }
+
+    const bankName = (banco || 'YAPE').toUpperCase();
 
     try {
         const db = await getDatabaseConnection();
@@ -86,11 +88,22 @@ app.post('/api/pagos', verifyApiKey, async (req, res) => {
         const columns = await db.all('PRAGMA table_info(pagos);');
         const hasCodigoSeguridad = columns.some(col => col.name === 'codigo_seguridad');
         const hasDispositivoId = columns.some(col => col.name === 'dispositivo_id');
+        const hasBanco = columns.some(col => col.name === 'banco');
 
         let query = '';
         let params = [];
 
-        if (hasCodigoSeguridad && hasDispositivoId) {
+        if (hasBanco) {
+            query = `INSERT INTO pagos (remitente, monto, timestamp, codigo_seguridad, banco, validado) 
+                     VALUES (?, ?, ?, ?, ?, 0)`;
+            params = [
+                remitente.trim(), 
+                parseFloat(monto), 
+                parseInt(timestamp), 
+                codigo_seguridad ? codigo_seguridad.trim() : '',
+                bankName
+            ];
+        } else if (hasCodigoSeguridad && hasDispositivoId) {
             query = `INSERT INTO pagos (remitente, monto, timestamp, codigo_seguridad, dispositivo_id, validado) 
                      VALUES (?, ?, ?, ?, ?, 0)`;
             params = [
@@ -128,7 +141,8 @@ app.post('/api/pagos', verifyApiKey, async (req, res) => {
 
         const pagoAdaptado = {
             ...newPayment,
-            codigo_seguridad: newPayment.codigo_seguridad !== undefined ? newPayment.codigo_seguridad : newPayment.dispositivo_id
+            codigo_seguridad: newPayment.codigo_seguridad !== undefined ? newPayment.codigo_seguridad : newPayment.dispositivo_id,
+            banco: newPayment.banco || bankName
         };
 
         // Emitir notificación por WebSocket en tiempo real
@@ -249,6 +263,21 @@ app.patch('/api/pagos/:id/validar', verifyJwtToken, async (req, res) => {
         return res.json({ message: 'Pago validado con éxito', pago: pagoAdaptado });
     } catch (error) {
         console.error('Error al validar pago:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint DELETE /api/pagos/:id (elimina un pago individual)
+app.delete('/api/pagos/:id', verifyJwtToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const db = await getDatabaseConnection();
+        await db.run('DELETE FROM pagos WHERE id = ?', [id]);
+        io.emit('pago_eliminado', { id });
+        console.log(`Pago ID ${id} eliminado por ${req.user.username}`);
+        return res.json({ message: 'Pago eliminado con éxito' });
+    } catch (error) {
+        console.error('Error al eliminar pago:', error);
         return res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

@@ -50,25 +50,41 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: 'API Key inválida o no proporcionada' });
     }
 
-    const { remitente, monto, timestamp, codigo_seguridad } = req.body;
+    const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body;
 
     if (!remitente || monto === undefined || !timestamp) {
       return res.status(400).json({ error: 'Faltan campos obligatorios: remitente, monto, timestamp' });
     }
 
-    const { data, error } = await supabase
+    const bankName = (banco || 'YAPE').toUpperCase();
+    const payload = {
+      remitente,
+      monto: parseFloat(monto),
+      timestamp: parseInt(timestamp),
+      codigo_seguridad: codigo_seguridad || null,
+      banco: bankName,
+      validado: 0
+    };
+
+    let { data, error } = await supabase
       .from('pagos')
-      .insert([
-        {
-          remitente,
-          monto: parseFloat(monto),
-          timestamp: parseInt(timestamp),
-          codigo_seguridad: codigo_seguridad || null,
-          validado: 0
-        }
-      ])
+      .insert([payload])
       .select()
       .single();
+
+    // Si falla porque la columna 'banco' aún no fue creada en la tabla de Supabase, reintentar sin 'banco'
+    if (error && error.message && error.message.toLowerCase().includes('banco')) {
+      const fallbackPayload = {
+        remitente,
+        monto: parseFloat(monto),
+        timestamp: parseInt(timestamp),
+        codigo_seguridad: codigo_seguridad || null,
+        validado: 0
+      };
+      const retry = await supabase.from('pagos').insert([fallbackPayload]).select().single();
+      data = retry.data ? { ...retry.data, banco: bankName } : null;
+      error = retry.error;
+    }
 
     if (error) {
       return res.status(500).json({ error: error.message });
@@ -76,7 +92,7 @@ export default async function handler(req, res) {
 
     return res.status(201).json({
       mensaje: 'Pago registrado exitosamente en Supabase',
-      pago: data
+      pago: data || { ...payload, id: Date.now() }
     });
   }
 
@@ -94,13 +110,31 @@ export default async function handler(req, res) {
     return res.status(200).json(data);
   }
 
-  // 3. LIMPIAR HISTORIAL
+  // 3. LIMPIAR O BORRAR HISTORIAL DE PAGOS
   if (req.method === 'DELETE') {
-    const { error } = await supabase.from('pagos').delete().neq('id', 0);
+    const { id } = req.query || {};
+
+    if (id) {
+      const { error } = await supabase.from('pagos').delete().eq('id', id);
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      return res.status(200).json({ mensaje: `Pago ${id} eliminado` });
+    }
+
+    // Borrado total de la tabla pagos en Supabase
+    let { error } = await supabase.from('pagos').delete().not('id', 'is', null);
     if (error) {
+      const fallback = await supabase.from('pagos').delete().gte('timestamp', 0);
+      error = fallback.error;
+    }
+
+    if (error) {
+      console.error('Error al limpiar pagos en Supabase:', error);
       return res.status(500).json({ error: error.message });
     }
-    return res.status(200).json({ mensaje: 'Historial eliminado' });
+
+    return res.status(200).json({ mensaje: 'Historial eliminado con éxito' });
   }
 
   return res.status(405).json({ error: 'Método no permitido' });
