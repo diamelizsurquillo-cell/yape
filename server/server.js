@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const crypto = require('crypto');
+const net = require('net');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
@@ -18,8 +19,18 @@ const io = new Server(server, {
     }
 });
 
+app.disable('x-powered-by');
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '64kb' }));
+
+// Cabeceras HTTP de Seguridad (OWASP)
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -27,10 +38,126 @@ const PORT = process.env.PORT || 3000;
 const YAPE_API_KEY = process.env.YAPE_API_KEY || 'mi_yape_secreto_123';
 const DASHBOARD_USERNAME = process.env.DASHBOARD_USERNAME || 'admin';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'yape1234';
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secreto_token_yape_987';
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secreto_token_yape_987_local_fallback';
+
+const rateLimitBuckets = new Map();
+
+function checkRateLimit(key, maxReqs = 10, windowMs = 60000) {
+    const now = Date.now();
+    const entry = rateLimitBuckets.get(key);
+    if (!entry || now > entry.resetAt) {
+        rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+        return { allowed: true, retryAfterSec: 0 };
+    }
+    entry.count += 1;
+    if (entry.count > maxReqs) {
+        return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) };
+    }
+    return { allowed: true, retryAfterSec: 0 };
+}
+
+function getDerivedAesKey() {
+    return crypto.scryptSync(JWT_SECRET, 'yape-saas-pwd-salt-v1', 32);
+}
+
+function encryptSecret(plainText) {
+    const text = String(plainText || '');
+    if (!text || text.startsWith('enc:v1:')) return text;
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', getDerivedAesKey(), iv);
+    const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return `enc:v1:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+function decryptSecret(storedValue) {
+    const val = String(storedValue || '');
+    if (!val.startsWith('enc:v1:')) return val;
+    try {
+        const parts = val.split(':');
+        if (parts.length !== 5) return '';
+        const iv = Buffer.from(parts[2], 'hex');
+        const authTag = Buffer.from(parts[3], 'hex');
+        const encrypted = Buffer.from(parts[4], 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', getDerivedAesKey(), iv);
+        decipher.setAuthTag(authTag);
+        return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+    } catch {
+        return '';
+    }
+}
+
+function safeEqualStrings(a, b) {
+    const bufA = Buffer.from(String(a || ''), 'utf8');
+    const bufB = Buffer.from(String(b || ''), 'utf8');
+    if (bufA.length !== bufB.length) {
+        crypto.timingSafeEqual(bufA, Buffer.alloc(bufA.length));
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function verifyPasswordTimingSafe(storedValue, candidatePlain) {
+    const realPlain = decryptSecret(storedValue);
+    if (!realPlain) return false;
+    return safeEqualStrings(realPlain, String(candidatePlain || ''));
+}
+
+function sanitizeText(str, maxLength = 100) {
+    return String(str || '')
+        .replace(/[\u0000-\u001F\u007F<>]/g, '')
+        .trim()
+        .slice(0, maxLength);
+}
+
+function isPrivateOrReservedIp(ip) {
+    if (net.isIPv4(ip)) {
+        const p = ip.split('.').map(Number);
+        if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true;
+        if (p[0] === 169 && p[1] === 254) return true;
+        if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+        if (p[0] === 192 && p[1] === 168) return true;
+        if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;
+        if (p[0] >= 224) return true;
+        return false;
+    }
+    if (net.isIPv6(ip)) {
+        const norm = ip.toLowerCase();
+        if (norm === '::1' || norm === '::' || norm.startsWith('fc') || norm.startsWith('fd') || norm.startsWith('fe80')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function validateSafeWebhookUrl(rawUrl) {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed) return { valid: true, url: '' };
+    let parsed;
+    try {
+        parsed = new URL(trimmed);
+    } catch {
+        return { valid: false, error: 'URL de Webhook inválida' };
+    }
+    if (parsed.protocol !== 'https:') {
+        return { valid: false, error: 'Por seguridad, el Webhook debe usar protocolo https://' };
+    }
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (
+        host === 'localhost' ||
+        host.endsWith('.localhost') ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal') ||
+        host === 'metadata.google.internal' ||
+        isPrivateOrReservedIp(host)
+    ) {
+        return { valid: false, error: 'URL de Webhook rechazada por política Anti-SSRF (hosts internos prohibidos).' };
+    }
+    return { valid: true, url: parsed.toString() };
+}
 
 function generateTenantApiKey() {
-    return `yp_live_${crypto.randomBytes(12).toString('hex')}`;
+    return `yp_live_${crypto.randomBytes(16).toString('hex')}`;
 }
 
 function checkBusinessSubscription(negocio) {
@@ -54,14 +181,15 @@ function checkBusinessSubscription(negocio) {
 }
 
 async function dispatchWebhookIfConfigured(negocio, pagoData) {
-    const url = (negocio?.webhook_url || '').trim();
-    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
+    const whCheck = validateSafeWebhookUrl(negocio?.webhook_url);
+    if (!whCheck.valid || !whCheck.url) return;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4500);
+    const timer = setTimeout(() => controller.abort(), 4000);
     try {
-        await fetch(url, {
+        await fetch(whCheck.url, {
             method: 'POST',
+            redirect: 'error',
             headers: {
                 'Content-Type': 'application/json',
                 'X-Webhook-Source': 'YapeMonitor-SaaS',
@@ -97,7 +225,7 @@ async function verifyJwtToken(req, res, next) {
     }
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
         req.user = decoded;
 
         if (decoded.rol !== 'SUPERADMIN' && decoded.negocio_id) {
@@ -109,7 +237,7 @@ async function verifyJwtToken(req, res, next) {
             }
         }
         next();
-    } catch (err) {
+    } catch {
         return res.status(403).json({ error: 'Token inválido o expirado' });
     }
 }
@@ -121,31 +249,47 @@ function emitToTenantAndSuperAdmin(eventName, payload, negocioId) {
     }
 }
 
+function mapUserForAdmin(u) {
+    return {
+        ...u,
+        activo: Boolean(u.activo),
+        password: decryptSecret(u.password)
+    };
+}
+
 // ==========================================
 // 1. AUTENTICACIÓN MULTI-EMPRESA (/api/auth/login)
 // ==========================================
 app.post('/api/auth/login', async (req, res) => {
-    const rawUser = (req.body?.username || '').trim();
-    const rawPass = req.body?.password || '';
+    const ip = req.ip || 'local';
+    const rl = checkRateLimit(`login:${ip}`, 12, 5 * 60 * 1000);
+    if (!rl.allowed) {
+        res.setHeader('Retry-After', String(rl.retryAfterSec));
+        return res.status(429).json({ error: `Demasiados intentos. Espera ${rl.retryAfterSec}s.` });
+    }
+
+    const rawUser = String(req.body?.username || '').trim().slice(0, 64);
+    const rawPass = String(req.body?.password || '').slice(0, 128);
 
     if (!rawUser || !rawPass) {
         return res.status(400).json({ error: 'Ingresa tu usuario y contraseña' });
     }
 
-    // SuperAdmin maestro
-    if (rawUser.toLowerCase() === DASHBOARD_USERNAME.toLowerCase() && rawPass === DASHBOARD_PASSWORD) {
-        const userProfile = {
+    if (
+        safeEqualStrings(rawUser.toLowerCase(), DASHBOARD_USERNAME.toLowerCase()) &&
+        safeEqualStrings(rawPass, DASHBOARD_PASSWORD)
+    ) {
+        const jwtClaims = {
             id: 'superadmin',
             username: DASHBOARD_USERNAME,
             nombre: 'Super Administrador',
             rol: 'SUPERADMIN',
             negocio_id: null,
             nombre_comercial: 'Administración Central SaaS',
-            plan: 'ILIMITADO',
-            api_key: YAPE_API_KEY
+            plan: 'ILIMITADO'
         };
-        const token = jwt.sign(userProfile, JWT_SECRET, { expiresIn: '7d' });
-        return res.json({ success: true, token, user: userProfile });
+        const token = jwt.sign(jwtClaims, JWT_SECRET, { algorithm: 'HS256', expiresIn: '3d' });
+        return res.json({ success: true, token, user: jwtClaims });
     }
 
     try {
@@ -155,8 +299,15 @@ app.post('/api/auth/login', async (req, res) => {
             [rawUser]
         );
 
-        if (!usuario || usuario.password !== rawPass) {
+        if (!usuario || !verifyPasswordTimingSafe(usuario.password, rawPass)) {
             return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+        }
+
+        if (usuario.password && !String(usuario.password).startsWith('enc:v1:')) {
+            await db.run('UPDATE usuarios_negocio SET password = ? WHERE id = ?', [
+                encryptSecret(rawPass),
+                usuario.id
+            ]);
         }
 
         if (!usuario.activo) {
@@ -174,7 +325,8 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         const rol = (usuario.rol || 'DUENO').toUpperCase();
-        const userProfile = {
+        // Sin api_key en el JWT
+        const jwtClaims = {
             id: usuario.id,
             username: usuario.username,
             nombre: usuario.nombre_mostrar || usuario.username,
@@ -183,17 +335,11 @@ app.post('/api/auth/login', async (req, res) => {
             nombre_comercial: negocio.nombre_comercial,
             plan: negocio.plan || 'MENSUAL',
             fecha_vencimiento: negocio.fecha_vencimiento,
-            ...(rol === 'DUENO'
-                ? {
-                      api_key: negocio.api_key,
-                      webhook_url: negocio.webhook_url || '',
-                      whatsapp_alerta: negocio.whatsapp_alerta || ''
-                  }
-                : {})
+            ...(rol === 'DUENO' ? { whatsapp_alerta: negocio.whatsapp_alerta || '' } : {})
         };
 
-        const token = jwt.sign(userProfile, JWT_SECRET, { expiresIn: '7d' });
-        return res.json({ success: true, token, user: userProfile });
+        const token = jwt.sign(jwtClaims, JWT_SECRET, { algorithm: 'HS256', expiresIn: '3d' });
+        return res.json({ success: true, token, user: jwtClaims });
     } catch (error) {
         console.error('Error en login:', error);
         return res.status(500).json({ error: 'Error interno del servidor' });
@@ -229,12 +375,12 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 
                 const enriched = negocios.map((n) => ({
                     ...n,
-                    usuarios: usuarios.filter((u) => u.negocio_id === n.id).map((u) => ({ ...u, activo: Boolean(u.activo) })),
+                    usuarios: usuarios.filter((u) => u.negocio_id === n.id).map(mapUserForAdmin),
                     total_pagos: statsMap[n.id]?.total_pagos || 0,
                     volumen_soles: statsMap[n.id]?.volumen_soles || 0
                 }));
 
-                return res.json({ schemaReady: true, negocios: enriched });
+                return res.json({ schemaReady: true, usingServiceRole: true, negocios: enriched });
             }
 
             const miNegocio = await db.get('SELECT * FROM negocios WHERE id = ?', [req.user.negocio_id]);
@@ -245,7 +391,7 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
             return res.json({
                 schemaReady: true,
                 negocio: miNegocio,
-                usuarios: misUsuarios.map((u) => ({ ...u, activo: Boolean(u.activo) }))
+                usuarios: misUsuarios.map(mapUserForAdmin)
             });
         }
 
@@ -271,24 +417,30 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                     notas_admin = ''
                 } = body;
 
-                if (!nombre_comercial || !dueno_username || !dueno_password) {
+                const cleanNombre = sanitizeText(nombre_comercial, 100);
+                const cleanDueno = sanitizeText(dueno_username, 50);
+                if (!cleanNombre || !cleanDueno || !dueno_password) {
                     return res.status(400).json({ error: 'Nombre comercial, usuario y clave del dueño son obligatorios' });
                 }
 
-                const dupDueno = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [dueno_username.trim()]);
+                const whCheck = validateSafeWebhookUrl(webhook_url);
+                if (!whCheck.valid) return res.status(400).json({ error: whCheck.error });
+
+                const dupDueno = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [cleanDueno]);
                 if (dupDueno) {
-                    return res.status(409).json({ error: `El usuario "${dueno_username}" ya está registrado.` });
+                    return res.status(409).json({ error: `El usuario "${cleanDueno}" ya está registrado.` });
                 }
-                if (cajero_username && cajero_username.trim()) {
-                    const dupCaj = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [cajero_username.trim()]);
+                const cleanCajero = sanitizeText(cajero_username, 50);
+                if (cleanCajero) {
+                    const dupCaj = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [cleanCajero]);
                     if (dupCaj) {
-                        return res.status(409).json({ error: `El usuario "${cajero_username}" ya está registrado.` });
+                        return res.status(409).json({ error: `El usuario "${cleanCajero}" ya está registrado.` });
                     }
                 }
 
                 const negocioId = crypto.randomUUID();
                 const apiKey = generateTenantApiKey();
-                const dias = Math.max(1, parseInt(dias_vigencia) || 30);
+                const dias = Math.min(3650, Math.max(1, parseInt(dias_vigencia, 10) || 30));
                 const fechaVenc = new Date(Date.now() + dias * 86400 * 1000).toISOString();
 
                 await db.run(
@@ -296,15 +448,15 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                      VALUES (?, ?, ?, ?, ?, ?, 'ACTIVO', ?, ?, ?, ?)`,
                     [
                         negocioId,
-                        nombre_comercial.trim(),
-                        ruc_o_telefono.trim(),
+                        cleanNombre,
+                        sanitizeText(ruc_o_telefono, 30),
                         apiKey,
-                        plan,
-                        parseFloat(precio_plan) || 0,
+                        ['TRIAL', 'MENSUAL', 'ANUAL'].includes(plan) ? plan : 'MENSUAL',
+                        Math.max(0, parseFloat(precio_plan) || 0),
                         fechaVenc,
-                        webhook_url.trim(),
-                        whatsapp_alerta.trim(),
-                        notas_admin.trim()
+                        whCheck.url,
+                        sanitizeText(whatsapp_alerta, 25),
+                        sanitizeText(notas_admin, 250)
                     ]
                 );
 
@@ -312,15 +464,15 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                 await db.run(
                     `INSERT INTO usuarios_negocio (id, negocio_id, username, password, nombre_mostrar, rol, activo)
                      VALUES (?, ?, ?, ?, ?, 'DUENO', 1)`,
-                    [duenoId, negocioId, dueno_username.trim(), dueno_password, `Dueño - ${nombre_comercial.trim()}`]
+                    [duenoId, negocioId, cleanDueno, encryptSecret(dueno_password), `Dueño - ${cleanNombre}`]
                 );
 
-                if (cajero_username && cajero_username.trim() && cajero_password) {
+                if (cleanCajero && cajero_password) {
                     const cajId = crypto.randomUUID();
                     await db.run(
                         `INSERT INTO usuarios_negocio (id, negocio_id, username, password, nombre_mostrar, rol, activo)
                          VALUES (?, ?, ?, ?, ?, 'CAJERO', 1)`,
-                        [cajId, negocioId, cajero_username.trim(), cajero_password, `Caja - ${nombre_comercial.trim()}`]
+                        [cajId, negocioId, cleanCajero, encryptSecret(cajero_password), `Caja - ${cleanNombre}`]
                     );
                 }
 
@@ -331,7 +483,7 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                     mensaje: 'Cliente registrado exitosamente',
                     negocio: {
                         ...nuevoNegocio,
-                        usuarios: usuarios.map((u) => ({ ...u, activo: Boolean(u.activo) })),
+                        usuarios: usuarios.map(mapUserForAdmin),
                         total_pagos: 0,
                         volumen_soles: 0
                     }
@@ -340,27 +492,28 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 
             if (action === 'create_usuario') {
                 const targetNegId = isSuperAdmin ? body.negocio_id : req.user.negocio_id;
-                const rolSolicitado = isSuperAdmin ? (body.rol || 'CAJERO').toUpperCase() : 'CAJERO';
-                const { username, password, nombre_mostrar } = body;
+                const rolSolicitado = isSuperAdmin && body.rol === 'DUENO' ? 'DUENO' : 'CAJERO';
+                const cleanUser = sanitizeText(body.username, 50);
+                const rawPassword = String(body.password || '');
 
-                if (!targetNegId || !username || !password) {
+                if (!targetNegId || !cleanUser || !rawPassword) {
                     return res.status(400).json({ error: 'Faltan datos obligatorios del usuario' });
                 }
 
-                const existe = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [username.trim()]);
+                const existe = await db.get('SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?)', [cleanUser]);
                 if (existe) return res.status(409).json({ error: 'Ese nombre de usuario ya está ocupado' });
 
                 const uid = crypto.randomUUID();
                 await db.run(
                     `INSERT INTO usuarios_negocio (id, negocio_id, username, password, nombre_mostrar, rol, activo)
                      VALUES (?, ?, ?, ?, ?, ?, 1)`,
-                    [uid, targetNegId, username.trim(), password, (nombre_mostrar || username).trim(), rolSolicitado]
+                    [uid, targetNegId, cleanUser, encryptSecret(rawPassword), sanitizeText(body.nombre_mostrar || cleanUser, 80), rolSolicitado]
                 );
 
                 const creado = await db.get('SELECT * FROM usuarios_negocio WHERE id = ?', [uid]);
                 return res.status(201).json({
                     mensaje: 'Usuario creado con éxito',
-                    usuario: { ...creado, activo: Boolean(creado.activo) }
+                    usuario: mapUserForAdmin(creado)
                 });
             }
         }
@@ -375,9 +528,10 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                 const neg = await db.get('SELECT * FROM negocios WHERE id = ?', [negocio_id]);
                 if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
 
+                const safeDias = Math.min(3650, Math.max(1, Number(dias) || 30));
                 const currentExp = neg.fecha_vencimiento ? new Date(neg.fecha_vencimiento).getTime() : Date.now();
                 const baseTime = currentExp > Date.now() ? currentExp : Date.now();
-                const nuevaFecha = new Date(baseTime + Number(dias) * 86400 * 1000).toISOString();
+                const nuevaFecha = new Date(baseTime + safeDias * 86400 * 1000).toISOString();
 
                 await db.run(
                     'UPDATE negocios SET fecha_vencimiento = ?, estado = ?, plan = COALESCE(?, plan) WHERE id = ?',
@@ -385,7 +539,7 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                 );
 
                 const updated = await db.get('SELECT * FROM negocios WHERE id = ?', [negocio_id]);
-                return res.json({ mensaje: `Suscripción extendida +${dias} días`, negocio: updated });
+                return res.json({ mensaje: `Suscripción extendida +${safeDias} días`, negocio: updated });
             }
 
             if (action === 'toggle_estado') {
@@ -410,15 +564,21 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                 const neg = await db.get('SELECT * FROM negocios WHERE id = ?', [targetId]);
                 if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
 
-                const webhook = body.webhook_url !== undefined ? body.webhook_url.trim() : neg.webhook_url;
-                const whatsapp = body.whatsapp_alerta !== undefined ? body.whatsapp_alerta.trim() : neg.whatsapp_alerta;
-                const nombre = isSuperAdmin && body.nombre_comercial ? body.nombre_comercial.trim() : neg.nombre_comercial;
-                const ruc = isSuperAdmin && body.ruc_o_telefono !== undefined ? body.ruc_o_telefono.trim() : neg.ruc_o_telefono;
+                let webhook = neg.webhook_url;
+                if (body.webhook_url !== undefined) {
+                    const whCheck = validateSafeWebhookUrl(body.webhook_url);
+                    if (!whCheck.valid) return res.status(400).json({ error: whCheck.error });
+                    webhook = whCheck.url;
+                }
+
+                const whatsapp = body.whatsapp_alerta !== undefined ? sanitizeText(body.whatsapp_alerta, 25) : neg.whatsapp_alerta;
+                const nombre = isSuperAdmin && body.nombre_comercial ? sanitizeText(body.nombre_comercial, 100) : neg.nombre_comercial;
+                const ruc = isSuperAdmin && body.ruc_o_telefono !== undefined ? sanitizeText(body.ruc_o_telefono, 30) : neg.ruc_o_telefono;
                 const plan = isSuperAdmin && body.plan ? body.plan : neg.plan;
                 const estado = isSuperAdmin && body.estado ? body.estado : neg.estado;
                 const fechaVenc = isSuperAdmin && body.fecha_vencimiento ? body.fecha_vencimiento : neg.fecha_vencimiento;
-                const precio = isSuperAdmin && body.precio_plan !== undefined ? parseFloat(body.precio_plan) || 0 : neg.precio_plan;
-                const notas = isSuperAdmin && body.notas_admin !== undefined ? body.notas_admin : neg.notas_admin;
+                const precio = isSuperAdmin && body.precio_plan !== undefined ? Math.max(0, parseFloat(body.precio_plan) || 0) : neg.precio_plan;
+                const notas = isSuperAdmin && body.notas_admin !== undefined ? sanitizeText(body.notas_admin, 250) : neg.notas_admin;
 
                 await db.run(
                     `UPDATE negocios SET webhook_url = ?, whatsapp_alerta = ?, nombre_comercial = ?, ruc_o_telefono = ?, plan = ?, estado = ?, fecha_vencimiento = ?, precio_plan = ?, notas_admin = ? WHERE id = ?`,
@@ -438,30 +598,31 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                 }
 
                 let finalUsername = targetUser.username;
-                if (username && username.trim() && username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
+                const cleanUser = username ? sanitizeText(username, 50) : '';
+                if (cleanUser && cleanUser.toLowerCase() !== targetUser.username.toLowerCase()) {
                     const dup = await db.get(
                         'SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?) AND id != ?',
-                        [username.trim(), usuario_id]
+                        [cleanUser, usuario_id]
                     );
                     if (dup) {
-                        return res.status(409).json({ error: `El nombre de usuario "${username.trim()}" ya está ocupado.` });
+                        return res.status(409).json({ error: `El nombre de usuario "${cleanUser}" ya está ocupado.` });
                     }
-                    finalUsername = username.trim();
+                    finalUsername = cleanUser;
                 }
 
                 await db.run(
                     `UPDATE usuarios_negocio SET username = ?, password = ?, rol = ?, activo = ?, nombre_mostrar = ? WHERE id = ?`,
                     [
                         finalUsername,
-                        password !== undefined && password !== '' ? password : targetUser.password,
+                        password !== undefined && password !== '' ? encryptSecret(password) : targetUser.password,
                         isSuperAdmin && rol ? rol.toUpperCase() : targetUser.rol,
                         activo !== undefined ? (activo ? 1 : 0) : targetUser.activo,
-                        nombre_mostrar ? nombre_mostrar.trim() : targetUser.nombre_mostrar,
+                        nombre_mostrar ? sanitizeText(nombre_mostrar, 80) : targetUser.nombre_mostrar,
                         usuario_id
                     ]
                 );
                 const updated = await db.get('SELECT * FROM usuarios_negocio WHERE id = ?', [usuario_id]);
-                return res.json({ mensaje: 'Usuario actualizado', usuario: { ...updated, activo: Boolean(updated.activo) } });
+                return res.json({ mensaje: 'Usuario actualizado', usuario: mapUserForAdmin(updated) });
             }
         }
 
@@ -502,14 +663,24 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 // 3. RECEPCIÓN Y GESTIÓN DE PAGOS (/api/pagos)
 // ==========================================
 app.post('/api/pagos', async (req, res) => {
-    const apiKey = (req.headers['x-api-key'] || '').trim();
+    const ip = req.ip || 'local';
+    const rl = checkRateLimit(`pagos-post:${ip}`, 45, 60 * 1000);
+    if (!rl.allowed) {
+        return res.status(429).json({ error: 'Límite de envíos excedido.' });
+    }
+
+    const apiKey = String(req.headers['x-api-key'] || '').trim();
     if (!apiKey) {
         return res.status(401).json({ error: 'API Key ausente en cabecera X-API-Key' });
     }
 
     const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body || {};
-    if (!remitente || monto === undefined || !timestamp) {
-        return res.status(400).json({ error: 'Campos faltantes en el payload' });
+    const cleanRemitente = sanitizeText(remitente, 100);
+    const numMonto = Number(monto);
+    const rawTs = parseInt(timestamp, 10);
+
+    if (!cleanRemitente || !Number.isFinite(numMonto) || numMonto <= 0 || numMonto > 50000) {
+        return res.status(400).json({ error: 'Datos de pago inválidos (verifica monto y remitente).' });
     }
 
     try {
@@ -521,24 +692,40 @@ app.post('/api/pagos', async (req, res) => {
             if (!sub.valid) {
                 return res.status(402).json({ error: sub.reason, subscription_expired: true });
             }
-        } else if (apiKey !== YAPE_API_KEY) {
+        } else if (!safeEqualStrings(apiKey, YAPE_API_KEY)) {
             return res.status(401).json({ error: 'API Key inválida o negocio no registrado' });
         }
 
-        const bankName = (banco || 'YAPE').toUpperCase();
+        const nowSec = Math.floor(Date.now() / 1000);
+        let safeTimestamp = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : nowSec;
+        if (safeTimestamp > 9999999999) safeTimestamp = Math.floor(safeTimestamp / 1000);
+        if (safeTimestamp > nowSec + 300) safeTimestamp = nowSec;
+
+        const rawBanco = sanitizeText(banco || 'YAPE', 12).toUpperCase();
+        const bankName = ['YAPE', 'PLIN', 'BBVA'].includes(rawBanco) ? rawBanco : 'YAPE';
+        const codSeg = sanitizeText(codigo_seguridad, 16);
         const negId = targetNegocio ? targetNegocio.id : null;
+        const cleanAmount = Math.round(numMonto * 100) / 100;
+
+        // Deduplicación anti-replay (20 segundos)
+        const dup = await db.get(
+            `SELECT * FROM pagos
+             WHERE COALESCE(negocio_id, '') = COALESCE(?, '')
+               AND remitente = ?
+               AND monto = ?
+               AND COALESCE(codigo_seguridad, '') = ?
+               AND timestamp >= ?
+             LIMIT 1`,
+            [negId, cleanRemitente, cleanAmount, codSeg, safeTimestamp - 20]
+        );
+        if (dup) {
+            return res.status(200).json({ message: 'Pago duplicado ignorado', duplicate_ignored: true, pago: dup });
+        }
 
         const result = await db.run(
             `INSERT INTO pagos (negocio_id, remitente, monto, timestamp, codigo_seguridad, banco, validado)
              VALUES (?, ?, ?, ?, ?, ?, 0)`,
-            [
-                negId,
-                String(remitente).trim(),
-                parseFloat(monto),
-                parseInt(timestamp),
-                codigo_seguridad ? String(codigo_seguridad).trim() : '',
-                bankName
-            ]
+            [negId, cleanRemitente, cleanAmount, safeTimestamp, codSeg, bankName]
         );
 
         const newPayment = await db.get('SELECT * FROM pagos WHERE id = ?', [result.lastID]);
@@ -555,7 +742,31 @@ app.post('/api/pagos', async (req, res) => {
     }
 });
 
-app.get('/api/pagos', verifyJwtToken, async (req, res) => {
+app.get('/api/pagos', async (req, res, next) => {
+    // Soporte para receptor Windows con X-API-Key sin exponer Supabase
+    if (req.query?.modo === 'desktop_poll') {
+        const apiKey = String(req.headers['x-api-key'] || '').trim();
+        if (!apiKey) return res.status(401).json({ error: 'X-API-Key requerida' });
+        try {
+            const db = await getDatabaseConnection();
+            let neg = null;
+            if (!safeEqualStrings(apiKey, YAPE_API_KEY)) {
+                neg = await db.get('SELECT * FROM negocios WHERE api_key = ?', [apiKey]);
+                if (!neg) return res.status(401).json({ error: 'API Key inválida' });
+                const sub = checkBusinessSubscription(neg);
+                if (!sub.valid) return res.status(403).json({ error: sub.reason });
+            }
+            const sinceSec = parseInt(req.query.since || '0', 10) || Math.floor(Date.now() / 1000) - 60;
+            const rows = neg
+                ? await db.all('SELECT * FROM pagos WHERE negocio_id = ? AND timestamp >= ? ORDER BY id ASC LIMIT 20', [neg.id, sinceSec])
+                : await db.all('SELECT * FROM pagos WHERE timestamp >= ? ORDER BY id ASC LIMIT 20', [sinceSec]);
+            return res.json({ negocio: neg ? neg.nombre_comercial : 'Modo Principal', pagos: rows });
+        } catch {
+            return res.status(500).json({ error: 'Error interno' });
+        }
+    }
+    return verifyJwtToken(req, res, next);
+}, async (req, res) => {
     const { fecha_inicio, fecha_fin, validado, search, banco, negocio_id: filterNegId } = req.query;
     const isSuperAdmin = req.user.rol === 'SUPERADMIN';
     const isCajero = req.user.rol === 'CAJERO';
@@ -598,7 +809,7 @@ app.get('/api/pagos', verifyJwtToken, async (req, res) => {
 
         if (validado !== undefined && validado !== '') {
             query += ' AND validado = ?';
-            params.push(parseInt(validado) === 1 ? 1 : 0);
+            params.push(parseInt(validado, 10) === 1 ? 1 : 0);
         }
 
         if (banco) {
@@ -608,11 +819,11 @@ app.get('/api/pagos', verifyJwtToken, async (req, res) => {
 
         if (search) {
             query += ' AND (remitente LIKE ? OR CAST(monto AS TEXT) LIKE ? OR codigo_seguridad LIKE ?)';
-            const term = `%${search}%`;
+            const term = `%${sanitizeText(search, 60)}%`;
             params.push(term, term, term);
         }
 
-        query += ' ORDER BY timestamp DESC';
+        query += ' ORDER BY timestamp DESC LIMIT 500';
         const pagos = await db.all(query, params);
         return res.json(pagos);
     } catch (error) {
@@ -624,7 +835,7 @@ app.get('/api/pagos', verifyJwtToken, async (req, res) => {
 async function handleValidarPago(req, res) {
     const id = req.params.id || req.query.id || req.body?.id;
     const notaPedido = req.body?.nota_pedido;
-    const userWhoValidated = req.user.nombre || req.user.username;
+    const userWhoValidated = sanitizeText(req.user.nombre || req.user.username, 60);
 
     if (!id) return res.status(400).json({ error: 'ID de pago requerido' });
 
@@ -640,7 +851,7 @@ async function handleValidarPago(req, res) {
         const fechaValidacion = new Date().toISOString();
         await db.run(
             `UPDATE pagos SET validado = 1, fecha_validacion = ?, usuario_validador = ?, nota_pedido = COALESCE(?, nota_pedido) WHERE id = ?`,
-            [fechaValidacion, userWhoValidated, notaPedido !== undefined ? String(notaPedido).trim() : null, id]
+            [fechaValidacion, userWhoValidated, notaPedido !== undefined ? sanitizeText(notaPedido, 120) : null, id]
         );
 
         const updatedPayment = await db.get('SELECT * FROM pagos WHERE id = ?', [id]);
@@ -717,18 +928,17 @@ app.delete('/api/pagos', verifyJwtToken, async (req, res) => {
     }
 });
 
-// WebSocket Connection con aislamiento por empresa (Salas / Rooms)
 io.on('connection', (socket) => {
     const token = socket.handshake.auth?.token;
     if (token) {
         try {
-            const decoded = jwt.verify(token, JWT_SECRET);
+            const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
             if (decoded.rol === 'SUPERADMIN') {
                 socket.join('role:SUPERADMIN');
             } else if (decoded.negocio_id) {
                 socket.join(`tenant:${decoded.negocio_id}`);
             }
-        } catch (err) {
+        } catch {
             // Token expirado o inválido
         }
     }
@@ -742,7 +952,7 @@ if (require.main === module) {
     getDatabaseConnection()
         .then(() => {
             server.listen(PORT, () => {
-                console.log(`Servidor SaaS Multi-Empresa ejecutándose en el puerto ${PORT}`);
+                console.log(`Servidor SaaS Multi-Empresa Blindado ejecutándose en el puerto ${PORT}`);
             });
         })
         .catch((err) => {

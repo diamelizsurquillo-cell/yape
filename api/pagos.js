@@ -2,7 +2,12 @@ import {
   setCorsHeaders,
   getSupabaseClient,
   extractAuthUser,
-  checkBusinessSubscription
+  checkBusinessSubscription,
+  validateSafeWebhookUrl,
+  sanitizeText,
+  safeEqualStrings,
+  getClientIp,
+  checkRateLimit
 } from './_utils.js';
 
 function enrichBankField(p) {
@@ -18,14 +23,15 @@ function enrichBankField(p) {
 }
 
 async function dispatchWebhookIfConfigured(negocio, pagoData) {
-  const url = (negocio?.webhook_url || '').trim();
-  if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
+  const whCheck = validateSafeWebhookUrl(negocio?.webhook_url);
+  if (!whCheck.valid || !whCheck.url) return;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4500);
+  const timer = setTimeout(() => controller.abort(), 4000);
   try {
-    await fetch(url, {
+    await fetch(whCheck.url, {
       method: 'POST',
+      redirect: 'error', // Bloquear redirecciones SSRF
       headers: {
         'Content-Type': 'application/json',
         'X-Webhook-Source': 'YapeMonitor-SaaS',
@@ -53,7 +59,7 @@ async function dispatchWebhookIfConfigured(negocio, pagoData) {
 }
 
 export default async function handler(req, res) {
-  setCorsHeaders(res);
+  setCorsHeaders(res, req);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -69,10 +75,17 @@ export default async function handler(req, res) {
   }
 
   // =========================================================================
-  // 1. REGISTRAR PAGO (DESDE APP ANDROID SENSOR O BOTÓN DE PRUEBA)
+  // 1. REGISTRAR PAGO (DESDE APP ANDROID SENSOR O BOTÓN DEMO)
   // =========================================================================
   if (req.method === 'POST') {
-    const apiKey = (req.headers['x-api-key'] || '').trim();
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`pagos-post:${ip}`, 45, 60 * 1000);
+    if (!rl.allowed) {
+      res.setHeader('Retry-After', String(rl.retryAfterSec));
+      return res.status(429).json({ error: 'Límite de envíos por minuto excedido.' });
+    }
+
+    const apiKey = String(req.headers['x-api-key'] || '').trim();
     const expectedMasterKey = (process.env.YAPE_API_KEY || 'mi_yape_secreto_123').trim();
 
     if (!apiKey) {
@@ -82,7 +95,6 @@ export default async function handler(req, res) {
     let targetNegocio = null;
     let isMasterAccount = false;
 
-    // 1A. Buscar si la API Key pertenece a un cliente suscriptor en tabla 'negocios'
     const { data: negRow, error: negErr } = await supabase
       .from('negocios')
       .select('*')
@@ -98,7 +110,7 @@ export default async function handler(req, res) {
         });
       }
       targetNegocio = negRow;
-    } else if (apiKey === expectedMasterKey) {
+    } else if (safeEqualStrings(apiKey, expectedMasterKey)) {
       isMasterAccount = true;
     } else {
       return res.status(401).json({ error: 'API Key inválida o negocio no registrado' });
@@ -106,17 +118,66 @@ export default async function handler(req, res) {
 
     const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body || {};
 
-    if (!remitente || monto === undefined || !timestamp) {
-      return res.status(400).json({ error: 'Faltan campos obligatorios: remitente, monto, timestamp' });
+    const cleanRemitente = sanitizeText(remitente, 100);
+    const numMonto = Number(monto);
+    const rawTs = parseInt(timestamp, 10);
+
+    if (!cleanRemitente || !Number.isFinite(numMonto) || numMonto <= 0 || numMonto > 50000) {
+      return res.status(400).json({
+        error: 'Datos de pago inválidos: verifica remitente y monto (entre S/ 0.01 y S/ 50,000).'
+      });
     }
 
-    const bankName = (banco || 'YAPE').toUpperCase();
-    const codSeguridad = codigo_seguridad || (bankName === 'BBVA' ? 'BBVA' : null);
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Normalizar timestamp (si llega en ms, pasarlo a segundos; impedir fechas futuras absurdas)
+    let safeTimestamp = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : nowSec;
+    if (safeTimestamp > 9999999999) {
+      safeTimestamp = Math.floor(safeTimestamp / 1000);
+    }
+    if (safeTimestamp > nowSec + 300) {
+      safeTimestamp = nowSec;
+    }
+
+    const rawBanco = sanitizeText(banco || 'YAPE', 12).toUpperCase();
+    const bankName = ['YAPE', 'PLIN', 'BBVA'].includes(rawBanco) ? rawBanco : 'YAPE';
+    const codSeguridad =
+      sanitizeText(codigo_seguridad, 16) || (bankName === 'BBVA' ? 'BBVA' : null);
+
+    // Protección Anti-Duplicados / Anti-Replay (ventana de 20 segundos)
+    try {
+      let dupQuery = supabase
+        .from('pagos')
+        .select('*')
+        .eq('remitente', cleanRemitente)
+        .eq('monto', Math.round(numMonto * 100) / 100)
+        .gte('timestamp', safeTimestamp - 20)
+        .limit(1);
+
+      if (targetNegocio) {
+        dupQuery = dupQuery.eq('negocio_id', targetNegocio.id);
+      } else {
+        dupQuery = dupQuery.is('negocio_id', null);
+      }
+
+      const { data: recentDups } = await dupQuery;
+      if (recentDups && recentDups.length > 0) {
+        const existingCod = recentDups[0].codigo_seguridad || null;
+        if (existingCod === codSeguridad) {
+          return res.status(200).json({
+            mensaje: 'Pago duplicado ignorado de forma segura',
+            duplicate_ignored: true,
+            pago: recentDups[0]
+          });
+        }
+      }
+    } catch {
+      // Continuar si el chequeo opcional no aplica
+    }
 
     const payload = {
-      remitente: String(remitente).trim(),
-      monto: parseFloat(monto),
-      timestamp: parseInt(timestamp),
+      remitente: cleanRemitente,
+      monto: Math.round(numMonto * 100) / 100,
+      timestamp: safeTimestamp,
       codigo_seguridad: codSeguridad,
       banco: bankName,
       validado: 0,
@@ -129,14 +190,13 @@ export default async function handler(req, res) {
       .select()
       .single();
 
-    // Retrocompatibilidad si aún no se ejecutó supabase_saas_migration.sql
     if (error && error.message) {
       const lowerMsg = error.message.toLowerCase();
       if (lowerMsg.includes('negocio_id') || lowerMsg.includes('banco')) {
         const fallbackPayload = {
-          remitente: String(remitente).trim(),
-          monto: parseFloat(monto),
-          timestamp: parseInt(timestamp),
+          remitente: cleanRemitente,
+          monto: payload.monto,
+          timestamp: safeTimestamp,
           codigo_seguridad: codSeguridad,
           validado: 0
         };
@@ -152,7 +212,6 @@ export default async function handler(req, res) {
 
     const finalPago = data || { ...payload, id: Date.now() };
 
-    // Disparar Webhook si el negocio tiene integración configurada (WooCommerce / Facturador)
     if (targetNegocio && targetNegocio.webhook_url) {
       await dispatchWebhookIfConfigured(targetNegocio, finalPago);
     }
@@ -165,7 +224,51 @@ export default async function handler(req, res) {
   }
 
   // =========================================================================
-  // Para GET, PATCH y DELETE requerimos sesión válida (SuperAdmin, Dueño o Cajero)
+  // 1B. POLLING AUTENTICADO PARA RECEPTOR DE ESCRITORIO WINDOWS (vía X-API-Key)
+  // Permite que desktop/yape-desktop.js funcione SIN llaves de Supabase expuestas
+  // =========================================================================
+  if (req.method === 'GET' && req.query?.modo === 'desktop_poll') {
+    const apiKey = String(req.headers['x-api-key'] || '').trim();
+    if (!apiKey) return res.status(401).json({ error: 'X-API-Key requerida' });
+
+    const expectedMasterKey = (process.env.YAPE_API_KEY || 'mi_yape_secreto_123').trim();
+    let targetNegocio = null;
+
+    if (!safeEqualStrings(apiKey, expectedMasterKey)) {
+      const { data: negRow } = await supabase
+        .from('negocios')
+        .select('id, nombre_comercial, estado, fecha_vencimiento')
+        .eq('api_key', apiKey)
+        .maybeSingle();
+
+      if (!negRow) return res.status(401).json({ error: 'API Key inválida' });
+      const sub = checkBusinessSubscription(negRow);
+      if (!sub.valid) return res.status(403).json({ error: sub.reason });
+      targetNegocio = negRow;
+    }
+
+    const sinceSec = parseInt(req.query.since || '0', 10) || Math.floor(Date.now() / 1000) - 60;
+    let q = supabase
+      .from('pagos')
+      .select('id, remitente, monto, timestamp, codigo_seguridad, banco, validado')
+      .gte('timestamp', sinceSec)
+      .order('id', { ascending: true })
+      .limit(20);
+
+    if (targetNegocio) {
+      q = q.eq('negocio_id', targetNegocio.id);
+    }
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.status(200).json({
+      negocio: targetNegocio ? targetNegocio.nombre_comercial : 'Modo Principal',
+      pagos: (data || []).map(enrichBankField)
+    });
+  }
+
+  // =========================================================================
+  // Para GET, PATCH y DELETE del Dashboard Web requerimos sesión JWT válida
   // =========================================================================
   const authUser = extractAuthUser(req);
   if (!authUser) {
@@ -175,7 +278,6 @@ export default async function handler(req, res) {
   const isSuperAdmin = authUser.rol === 'SUPERADMIN';
   const isCajero = authUser.rol === 'CAJERO';
 
-  // Si pertenece a un negocio cliente, verificar que su suscripción siga activa en tiempo real
   if (!isSuperAdmin && authUser.negocio_id) {
     const { data: negActual } = await supabase
       .from('negocios')
@@ -200,7 +302,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     const { negocio_id: filterNegocioId, validado, search, fecha_inicio, fecha_fin } = req.query || {};
 
-    let query = supabase.from('pagos').select('*').order('timestamp', { ascending: false });
+    let query = supabase.from('pagos').select('*').order('timestamp', { ascending: false }).limit(500);
 
     if (!isSuperAdmin) {
       query = query.eq('negocio_id', authUser.negocio_id);
@@ -210,7 +312,6 @@ export default async function handler(req, res) {
       query = query.eq('negocio_id', filterNegocioId);
     }
 
-    // Si es CAJERO, restringir estrictamente a las últimas 24 horas (pagos del turno/día)
     if (isCajero) {
       const hace24hEpoch = Math.floor(Date.now() / 1000) - 86400;
       query = query.gte('timestamp', hace24hEpoch);
@@ -226,18 +327,17 @@ export default async function handler(req, res) {
     }
 
     if (validado !== undefined && validado !== '') {
-      query = query.eq('validado', parseInt(validado));
+      query = query.eq('validado', parseInt(validado, 10) === 1 ? 1 : 0);
     }
 
     if (search) {
-      query = query.ilike('remitente', `%${search}%`);
+      query = query.ilike('remitente', `%${sanitizeText(search, 60)}%`);
     }
 
     let { data, error } = await query;
 
-    // Fallback retrocompatible si aún no existe columna negocio_id en Supabase y entra SuperAdmin
     if (error && isSuperAdmin && (error.message || '').toLowerCase().includes('negocio_id')) {
-      const retry = await supabase.from('pagos').select('*').order('timestamp', { ascending: false });
+      const retry = await supabase.from('pagos').select('*').order('timestamp', { ascending: false }).limit(500);
       data = retry.data;
       error = retry.error;
     }
@@ -250,7 +350,7 @@ export default async function handler(req, res) {
   }
 
   // =========================================================================
-  // 3. VALIDAR / MARCAR PAGO COMO ATENDIDO (CAJERO, DUEÑO O SUPERADMIN)
+  // 3. VALIDAR PAGO
   // =========================================================================
   if (req.method === 'PATCH') {
     const id = req.query?.id || req.body?.id;
@@ -260,7 +360,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'ID de pago requerido para validar' });
     }
 
-    // Verificar pertenencia del pago
     const { data: pagoExistente, error: findErr } = await supabase
       .from('pagos')
       .select('*')
@@ -278,10 +377,10 @@ export default async function handler(req, res) {
     const updateData = {
       validado: 1,
       fecha_validacion: new Date().toISOString(),
-      usuario_validador: authUser.nombre || authUser.username
+      usuario_validador: sanitizeText(authUser.nombre || authUser.username, 60)
     };
     if (nota_pedido !== undefined) {
-      updateData.nota_pedido = String(nota_pedido).trim();
+      updateData.nota_pedido = sanitizeText(nota_pedido, 120);
     }
 
     let { data: updated, error: updErr } = await supabase
@@ -291,7 +390,6 @@ export default async function handler(req, res) {
       .select()
       .single();
 
-    // Fallback si faltan columnas opcionales en BD antigua
     if (updErr && updErr.message) {
       const retry = await supabase
         .from('pagos')
@@ -341,7 +439,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ mensaje: `Pago ${id} eliminado` });
     }
 
-    // Borrado masivo del historial: SOLO del negocio actual
     if (!isSuperAdmin) {
       const { error } = await supabase
         .from('pagos')
@@ -351,7 +448,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ mensaje: 'Historial de tu negocio limpiado con éxito' });
     }
 
-    // Si es SuperAdmin: puede borrar por negocio específico o todo
     if (targetNegId && targetNegId !== 'ALL') {
       const q =
         targetNegId === 'MASTER'

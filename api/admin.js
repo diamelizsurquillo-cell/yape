@@ -2,11 +2,23 @@ import {
   setCorsHeaders,
   getSupabaseClient,
   extractAuthUser,
-  generateTenantApiKey
+  generateTenantApiKey,
+  encryptSecret,
+  decryptSecret,
+  validateSafeWebhookUrl,
+  sanitizeText,
+  getSecurityPosture
 } from './_utils.js';
 
+function mapUserForAdmin(u) {
+  return {
+    ...u,
+    password: decryptSecret(u.password)
+  };
+}
+
 export default async function handler(req, res) {
-  setCorsHeaders(res);
+  setCorsHeaders(res, req);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -24,7 +36,7 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: 'Acceso restringido a administradores' });
   }
 
-  const { supabase, hasUrl, hasKey } = getSupabaseClient();
+  const { supabase, hasUrl, hasKey, usingServiceRole } = getSupabaseClient();
   if (!supabase) {
     return res.status(500).json({
       error: 'Supabase no está configurado en las variables de entorno',
@@ -49,6 +61,7 @@ export default async function handler(req, res) {
           if (msg.includes('negocios') || msg.includes('does not exist') || msg.includes('schema cache')) {
             return res.status(200).json({
               schemaReady: false,
+              usingServiceRole,
               negocios: [],
               mensaje: 'Falta ejecutar el script SQL Multi-Empresa en Supabase.'
             });
@@ -61,7 +74,16 @@ export default async function handler(req, res) {
           .select('*')
           .order('created_at', { ascending: true });
 
-        // Contar pagos por negocio de forma ligera
+        // Migrar silenciosamente cualquier clave antigua en texto plano a AES-256-GCM
+        for (const u of usuarios || []) {
+          if (u.password && !String(u.password).startsWith('enc:v1:')) {
+            await supabase
+              .from('usuarios_negocio')
+              .update({ password: encryptSecret(u.password) })
+              .eq('id', u.id);
+          }
+        }
+
         const { data: pagosResumen } = await supabase
           .from('pagos')
           .select('negocio_id, monto');
@@ -76,13 +98,17 @@ export default async function handler(req, res) {
 
         const enriched = (negocios || []).map((neg) => ({
           ...neg,
-          usuarios: (usuarios || []).filter((u) => u.negocio_id === neg.id),
+          usuarios: (usuarios || [])
+            .filter((u) => u.negocio_id === neg.id)
+            .map(mapUserForAdmin),
           total_pagos: conteoPorNegocio[neg.id] || 0,
           volumen_soles: montoPorNegocio[neg.id] || 0
         }));
 
         return res.status(200).json({
           schemaReady: true,
+          usingServiceRole,
+          securityPosture: getSecurityPosture(),
           negocios: enriched
         });
       }
@@ -107,7 +133,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         schemaReady: true,
         negocio: miNegocio,
-        usuarios: misUsuarios || []
+        usuarios: (misUsuarios || []).map(mapUserForAdmin)
       });
     }
 
@@ -118,7 +144,6 @@ export default async function handler(req, res) {
       const body = req.body || {};
       const action = body.action || 'create_negocio';
 
-      // Crear nuevo cliente/negocio (Exclusivo SuperAdmin)
       if (action === 'create_negocio') {
         if (!isSuperAdmin) {
           return res.status(403).json({ error: 'Solo el SuperAdmin puede registrar empresas' });
@@ -139,16 +164,24 @@ export default async function handler(req, res) {
           notas_admin = ''
         } = body;
 
-        if (!nombre_comercial || !dueno_username || !dueno_password) {
+        const cleanNombre = sanitizeText(nombre_comercial, 100);
+        const cleanDuenoUser = sanitizeText(dueno_username, 50);
+
+        if (!cleanNombre || !cleanDuenoUser || !dueno_password) {
           return res.status(400).json({
             error: 'Nombre comercial, usuario del dueño y contraseña del dueño son obligatorios.'
           });
         }
 
-        // Validar que no exista el username
-        const usernamesToCheck = [dueno_username.trim()];
-        if (cajero_username && cajero_username.trim()) {
-          usernamesToCheck.push(cajero_username.trim());
+        const webhookCheck = validateSafeWebhookUrl(webhook_url);
+        if (!webhookCheck.valid) {
+          return res.status(400).json({ error: webhookCheck.error });
+        }
+
+        const usernamesToCheck = [cleanDuenoUser];
+        const cleanCajeroUser = sanitizeText(cajero_username, 50);
+        if (cleanCajeroUser) {
+          usernamesToCheck.push(cleanCajeroUser);
         }
 
         const { data: existingUsers } = await supabase
@@ -162,7 +195,7 @@ export default async function handler(req, res) {
           });
         }
 
-        const dias = Math.max(1, parseInt(dias_vigencia) || 30);
+        const dias = Math.min(3650, Math.max(1, parseInt(dias_vigencia) || 30));
         const fechaVencimiento = new Date(Date.now() + dias * 86400 * 1000).toISOString();
         const apiKey = generateTenantApiKey();
 
@@ -170,16 +203,16 @@ export default async function handler(req, res) {
           .from('negocios')
           .insert([
             {
-              nombre_comercial: nombre_comercial.trim(),
-              ruc_o_telefono: ruc_o_telefono.trim(),
+              nombre_comercial: cleanNombre,
+              ruc_o_telefono: sanitizeText(ruc_o_telefono, 30),
               api_key: apiKey,
-              plan,
-              precio_plan: parseFloat(precio_plan) || 0,
+              plan: ['TRIAL', 'MENSUAL', 'ANUAL'].includes(plan) ? plan : 'MENSUAL',
+              precio_plan: Math.max(0, parseFloat(precio_plan) || 0),
               estado: 'ACTIVO',
               fecha_vencimiento: fechaVencimiento,
-              webhook_url: webhook_url.trim(),
-              whatsapp_alerta: whatsapp_alerta.trim(),
-              notas_admin: notas_admin.trim()
+              webhook_url: webhookCheck.url,
+              whatsapp_alerta: sanitizeText(whatsapp_alerta, 25),
+              notas_admin: sanitizeText(notas_admin, 250)
             }
           ])
           .select()
@@ -192,20 +225,20 @@ export default async function handler(req, res) {
         const usersToInsert = [
           {
             negocio_id: nuevoNegocio.id,
-            username: dueno_username.trim(),
-            password: dueno_password,
-            nombre_mostrar: `Dueño - ${nombre_comercial.trim()}`,
+            username: cleanDuenoUser,
+            password: encryptSecret(dueno_password),
+            nombre_mostrar: `Dueño - ${cleanNombre}`,
             rol: 'DUENO',
             activo: true
           }
         ];
 
-        if (cajero_username && cajero_username.trim() && cajero_password) {
+        if (cleanCajeroUser && cajero_password) {
           usersToInsert.push({
             negocio_id: nuevoNegocio.id,
-            username: cajero_username.trim(),
-            password: cajero_password,
-            nombre_mostrar: `Caja - ${nombre_comercial.trim()}`,
+            username: cleanCajeroUser,
+            password: encryptSecret(cajero_password),
+            nombre_mostrar: `Caja - ${cleanNombre}`,
             rol: 'CAJERO',
             activo: true
           });
@@ -217,7 +250,6 @@ export default async function handler(req, res) {
           .select();
 
         if (usrErr) {
-          // Revertir negocio si falló la creación de usuario
           await supabase.from('negocios').delete().eq('id', nuevoNegocio.id);
           return res.status(500).json({ error: usrErr.message });
         }
@@ -226,27 +258,28 @@ export default async function handler(req, res) {
           mensaje: 'Cliente registrado exitosamente',
           negocio: {
             ...nuevoNegocio,
-            usuarios: creados || [],
+            usuarios: (creados || []).map(mapUserForAdmin),
             total_pagos: 0,
             volumen_soles: 0
           }
         });
       }
 
-      // Crear usuario adicional (Cajero o Dueño)
       if (action === 'create_usuario') {
         const targetNegocioId = isSuperAdmin ? body.negocio_id : authUser.negocio_id;
-        const rolSolicitado = isSuperAdmin ? (body.rol || 'CAJERO').toUpperCase() : 'CAJERO';
-        const { username, password, nombre_mostrar } = body;
+        const rolSolicitado =
+          isSuperAdmin && body.rol === 'DUENO' ? 'DUENO' : 'CAJERO';
+        const cleanUser = sanitizeText(body.username, 50);
+        const rawPassword = String(body.password || '');
 
-        if (!targetNegocioId || !username || !password) {
+        if (!targetNegocioId || !cleanUser || !rawPassword) {
           return res.status(400).json({ error: 'Faltan datos obligatorios del usuario' });
         }
 
         const { data: existe } = await supabase
           .from('usuarios_negocio')
           .select('id')
-          .ilike('username', username.trim())
+          .ilike('username', cleanUser)
           .maybeSingle();
 
         if (existe) {
@@ -258,9 +291,9 @@ export default async function handler(req, res) {
           .insert([
             {
               negocio_id: targetNegocioId,
-              username: username.trim(),
-              password,
-              nombre_mostrar: (nombre_mostrar || username).trim(),
+              username: cleanUser,
+              password: encryptSecret(rawPassword),
+              nombre_mostrar: sanitizeText(body.nombre_mostrar || cleanUser, 80),
               rol: rolSolicitado,
               activo: true
             }
@@ -269,7 +302,10 @@ export default async function handler(req, res) {
           .single();
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.status(201).json({ mensaje: 'Usuario creado con éxito', usuario: nuevoUsuario });
+        return res.status(201).json({
+          mensaje: 'Usuario creado con éxito',
+          usuario: mapUserForAdmin(nuevoUsuario)
+        });
       }
 
       return res.status(400).json({ error: 'Acción POST desconocida' });
@@ -282,7 +318,6 @@ export default async function handler(req, res) {
       const body = req.body || {};
       const { action } = body;
 
-      // Renovar días de suscripción (SuperAdmin)
       if (action === 'extend_plan') {
         if (!isSuperAdmin) return res.status(403).json({ error: 'No autorizado' });
         const { negocio_id, dias = 30, plan } = body;
@@ -295,15 +330,16 @@ export default async function handler(req, res) {
 
         if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
 
+        const safeDias = Math.min(3650, Math.max(1, Number(dias) || 30));
         const currentExp = neg.fecha_vencimiento ? new Date(neg.fecha_vencimiento).getTime() : Date.now();
         const baseTime = currentExp > Date.now() ? currentExp : Date.now();
-        const nuevaFecha = new Date(baseTime + Number(dias) * 86400 * 1000).toISOString();
+        const nuevaFecha = new Date(baseTime + safeDias * 86400 * 1000).toISOString();
 
         const updates = {
           fecha_vencimiento: nuevaFecha,
           estado: 'ACTIVO'
         };
-        if (plan) updates.plan = plan;
+        if (plan && ['TRIAL', 'MENSUAL', 'ANUAL'].includes(plan)) updates.plan = plan;
 
         const { data: updated, error } = await supabase
           .from('negocios')
@@ -313,10 +349,9 @@ export default async function handler(req, res) {
           .single();
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.status(200).json({ mensaje: `Suscripción extendida +${dias} días`, negocio: updated });
+        return res.status(200).json({ mensaje: `Suscripción extendida +${safeDias} días`, negocio: updated });
       }
 
-      // Suspender o Activar negocio (SuperAdmin)
       if (action === 'toggle_estado') {
         if (!isSuperAdmin) return res.status(403).json({ error: 'No autorizado' });
         const { negocio_id, estado } = body;
@@ -332,7 +367,6 @@ export default async function handler(req, res) {
         return res.status(200).json({ mensaje: 'Estado actualizado', negocio: updated });
       }
 
-      // Regenerar API Key del negocio (SuperAdmin o Dueño de su propio negocio)
       if (action === 'regenerate_apikey') {
         const targetId = isSuperAdmin ? body.negocio_id : authUser.negocio_id;
         const newKey = generateTenantApiKey();
@@ -348,22 +382,40 @@ export default async function handler(req, res) {
         return res.status(200).json({ mensaje: 'Nueva API Key generada', api_key: newKey, negocio: updated });
       }
 
-      // Actualizar Webhook, WhatsApp o datos completos del negocio
       if (action === 'update_settings') {
         const targetId = isSuperAdmin ? (body.negocio_id || authUser.negocio_id) : authUser.negocio_id;
         const updates = {};
-        if (body.webhook_url !== undefined) updates.webhook_url = body.webhook_url.trim();
-        if (body.whatsapp_alerta !== undefined) updates.whatsapp_alerta = body.whatsapp_alerta.trim();
-        if (isSuperAdmin) {
-          if (body.nombre_comercial !== undefined && body.nombre_comercial.trim()) {
-            updates.nombre_comercial = body.nombre_comercial.trim();
+
+        if (body.webhook_url !== undefined) {
+          const whCheck = validateSafeWebhookUrl(body.webhook_url);
+          if (!whCheck.valid) {
+            return res.status(400).json({ error: whCheck.error });
           }
-          if (body.ruc_o_telefono !== undefined) updates.ruc_o_telefono = body.ruc_o_telefono.trim();
-          if (body.plan !== undefined) updates.plan = body.plan;
-          if (body.estado !== undefined) updates.estado = body.estado;
-          if (body.precio_plan !== undefined) updates.precio_plan = parseFloat(body.precio_plan) || 0;
-          if (body.notas_admin !== undefined) updates.notas_admin = body.notas_admin;
-          if (body.fecha_vencimiento !== undefined && body.fecha_vencimiento) {
+          updates.webhook_url = whCheck.url;
+        }
+        if (body.whatsapp_alerta !== undefined) {
+          updates.whatsapp_alerta = sanitizeText(body.whatsapp_alerta, 25);
+        }
+        if (isSuperAdmin) {
+          if (body.nombre_comercial !== undefined && sanitizeText(body.nombre_comercial, 100)) {
+            updates.nombre_comercial = sanitizeText(body.nombre_comercial, 100);
+          }
+          if (body.ruc_o_telefono !== undefined) {
+            updates.ruc_o_telefono = sanitizeText(body.ruc_o_telefono, 30);
+          }
+          if (body.plan && ['TRIAL', 'MENSUAL', 'ANUAL'].includes(body.plan)) {
+            updates.plan = body.plan;
+          }
+          if (body.estado && ['ACTIVO', 'SUSPENDIDO'].includes(body.estado)) {
+            updates.estado = body.estado;
+          }
+          if (body.precio_plan !== undefined) {
+            updates.precio_plan = Math.max(0, parseFloat(body.precio_plan) || 0);
+          }
+          if (body.notas_admin !== undefined) {
+            updates.notas_admin = sanitizeText(body.notas_admin, 250);
+          }
+          if (body.fecha_vencimiento) {
             updates.fecha_vencimiento = body.fecha_vencimiento;
           }
         }
@@ -379,7 +431,6 @@ export default async function handler(req, res) {
         return res.status(200).json({ mensaje: 'Datos del cliente actualizados', negocio: updated });
       }
 
-      // Cambiar usuario, clave, rol o estado de un usuario (SuperAdmin o Dueño sobre sus cajeros)
       if (action === 'update_usuario') {
         const { usuario_id, username, password, rol, activo, nombre_mostrar } = body;
         const { data: targetUser } = await supabase
@@ -394,22 +445,27 @@ export default async function handler(req, res) {
         }
 
         const updates = {};
-        if (username && username.trim() && username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
+        const cleanUser = username ? sanitizeText(username, 50) : '';
+        if (cleanUser && cleanUser.toLowerCase() !== targetUser.username.toLowerCase()) {
           const { data: dup } = await supabase
             .from('usuarios_negocio')
             .select('id')
-            .ilike('username', username.trim())
+            .ilike('username', cleanUser)
             .neq('id', usuario_id)
             .maybeSingle();
           if (dup) {
-            return res.status(409).json({ error: `El nombre de usuario "${username.trim()}" ya está ocupado.` });
+            return res.status(409).json({ error: `El nombre de usuario "${cleanUser}" ya está ocupado.` });
           }
-          updates.username = username.trim();
+          updates.username = cleanUser;
         }
-        if (password !== undefined && password !== '') updates.password = password;
-        if (isSuperAdmin && rol) updates.rol = rol.toUpperCase();
+        if (password !== undefined && password !== '') {
+          updates.password = encryptSecret(password);
+        }
+        if (isSuperAdmin && rol && ['DUENO', 'CAJERO'].includes(rol.toUpperCase())) {
+          updates.rol = rol.toUpperCase();
+        }
         if (activo !== undefined) updates.activo = Boolean(activo);
-        if (nombre_mostrar) updates.nombre_mostrar = nombre_mostrar.trim();
+        if (nombre_mostrar) updates.nombre_mostrar = sanitizeText(nombre_mostrar, 80);
 
         const { data: updated, error } = await supabase
           .from('usuarios_negocio')
@@ -419,7 +475,10 @@ export default async function handler(req, res) {
           .single();
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.status(200).json({ mensaje: 'Usuario actualizado', usuario: updated });
+        return res.status(200).json({
+          mensaje: 'Usuario actualizado',
+          usuario: mapUserForAdmin(updated)
+        });
       }
 
       return res.status(400).json({ error: 'Acción PATCH desconocida' });

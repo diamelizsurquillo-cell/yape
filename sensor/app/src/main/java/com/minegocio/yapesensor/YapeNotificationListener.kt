@@ -16,6 +16,42 @@ class YapeNotificationListener : NotificationListenerService() {
         const val YAPE_PACKAGE_NAME = "com.bcp.innovacxion.yapeapp"
         private const val TAG = "YapeNotificationListener"
 
+        // SEC-02: Lista Blanca estricta de paquetes bancarios oficiales del Perú (Antifraude WhatsApp/SMS)
+        private val OFFICIAL_BANK_PACKAGES = setOf(
+            "com.bcp.innovacxion.yapeapp",           // Yape Oficial
+            "com.bcp.bank.bcp",                      // Banca Móvil BCP
+            "com.bbva.nxt_peru",                     // BBVA Perú
+            "com.bbva.continental",                  // BBVA Continental
+            "com.bbva.netcash",                      // BBVA Empresas Net Cash
+            "pe.com.interbank.mobilebanking",        // Interbank (Plin)
+            "pe.com.interbank.mpay",                 // IzipayYA / Interbank Plin
+            "pe.indigital.tunki",                    // Tunki / IzipayYA (Plin)
+            "pe.com.scotiabank.blpm.android.client", // Scotiabank Perú (Plin)
+            "com.banbif.bancamovil",                 // BanBif (Plin)
+            "pe.com.cajapiura.app",                  // Caja Piura
+            "pe.com.cajaarequipa.movil",             // Caja Arequipa
+            "pe.com.cmacica.movil",                  // Caja Ica
+            "pe.com.cajatrujillo.movil",             // Caja Trujillo
+            "pe.com.cajahuancayo.app",               // Caja Huancayo
+            "pe.com.cajacusco.movil"                 // Caja Cusco
+        )
+
+        private val MESSAGING_OR_SOCIAL_PACKAGES = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "org.telegram.messenger",
+            "org.thunderdog.challegram",
+            "com.google.android.apps.messaging",
+            "com.samsung.android.messaging",
+            "com.android.mms",
+            "com.facebook.orca",
+            "com.facebook.katana",
+            "com.instagram.android",
+            "com.zhiliaoapp.musically",
+            "com.google.android.gm",
+            "com.microsoft.office.outlook"
+        )
+
         fun tryRebind(context: android.content.Context) {
             try {
                 val componentName = ComponentName(context, YapeNotificationListener::class.java)
@@ -54,9 +90,10 @@ class YapeNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
-        if (sbn == null) return
+        if (sbn == null || sbn.isOngoing) return
 
-        val packageName = sbn.packageName ?: ""
+        val packageName = (sbn.packageName ?: "").trim()
+        val normalizedPkg = packageName.lowercase()
         val extras = sbn.notification.extras
         val title = extras.getString(NotificationCompat.EXTRA_TITLE)?.trim()
         
@@ -72,33 +109,37 @@ class YapeNotificationListener : NotificationListenerService() {
             .maxByOrNull { it.length }?.trim()
         
         val timestamp = sbn.postTime
+        val combinedSearchText = "$title $text".lowercase()
 
-        val combinedSearchText = "$title $text $packageName".lowercase()
-        val isPaymentCandidate = packageName.equals(YAPE_PACKAGE_NAME, ignoreCase = true) ||
-                packageName.contains("yape", ignoreCase = true) ||
-                packageName.contains("bbva", ignoreCase = true) ||
-                packageName.contains("bcp", ignoreCase = true) ||
-                packageName.contains("plin", ignoreCase = true) ||
-                packageName.contains("interbank", ignoreCase = true) ||
+        // SEC-02: Bloqueo antifraude estricto. Jamás aceptar notificaciones de WhatsApp, SMS, Telegram, etc.
+        if (!OFFICIAL_BANK_PACKAGES.contains(normalizedPkg)) {
+            if (MESSAGING_OR_SOCIAL_PACKAGES.contains(normalizedPkg) &&
+                (combinedSearchText.contains("te yape") ||
+                 combinedSearchText.contains("cód. de seguridad") ||
+                 combinedSearchText.contains("cod. de seguridad") ||
+                 combinedSearchText.contains("te pline"))
+            ) {
+                DiagnosticLogger.log("🛡️ ALERTA ANTIFRAUDE: Intento de pago falso bloqueado desde app no bancaria [$packageName]")
+            }
+            return
+        }
+
+        val hasPaymentKeywords = combinedSearchText.contains("s/") ||
                 combinedSearchText.contains("yape") ||
-                combinedSearchText.contains("bbva") ||
                 combinedSearchText.contains("plin") ||
+                combinedSearchText.contains("bbva") ||
                 combinedSearchText.contains("cobro con qr") ||
-                combinedSearchText.contains("te yape") ||
-                combinedSearchText.contains("te han yapeado") ||
-                combinedSearchText.contains("te acaban de yapear") ||
                 combinedSearchText.contains("te envió") ||
                 combinedSearchText.contains("te envio") ||
                 combinedSearchText.contains("te hizo un pago") ||
                 combinedSearchText.contains("te transfiri") ||
                 combinedSearchText.contains("recibiste") ||
                 combinedSearchText.contains("has recibido") ||
-                combinedSearchText.contains("confirmación de pago") ||
-                combinedSearchText.contains("confirmacion de pago") ||
                 combinedSearchText.contains("pago recibido") ||
-                combinedSearchText.contains("nuevo pago")
+                combinedSearchText.contains("confirmación de pago") ||
+                combinedSearchText.contains("confirmacion de pago")
 
-        if (!isPaymentCandidate) {
+        if (!hasPaymentKeywords) {
             return
         }
 

@@ -35,9 +35,15 @@ class PaymentUploadWorker(
 
         // Construir la URL completa del endpoint de pagos: si la url de ajustes no termina en /api/pagos, se le puede autocompletar.
         // Pero para flexibilidad del usuario, asumiremos que se ingresa el endpoint completo o lo normalizamos.
+        // SEC-09: Priorizar HTTPS en dominios en la nube; permitir HTTP solo en IPs locales de desarrollo
         var targetUrl = backendUrl.trim()
         if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
-            targetUrl = "http://$targetUrl"
+            val lowerHost = targetUrl.lowercase()
+            val isLocalLan = lowerHost.startsWith("localhost") ||
+                    lowerHost.startsWith("127.") ||
+                    lowerHost.startsWith("192.168.") ||
+                    lowerHost.startsWith("10.")
+            targetUrl = if (isLocalLan) "http://$targetUrl" else "https://$targetUrl"
         }
         if (!targetUrl.endsWith("/api/pagos") && !targetUrl.endsWith("/api/pagos/")) {
             // Si el usuario ingresó solo el dominio/ip, añadimos la ruta por defecto

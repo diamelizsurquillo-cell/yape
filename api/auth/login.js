@@ -2,11 +2,16 @@ import {
   setCorsHeaders,
   getSupabaseClient,
   signJwt,
-  checkBusinessSubscription
+  checkBusinessSubscription,
+  getClientIp,
+  checkRateLimit,
+  safeEqualStrings,
+  verifyPasswordTimingSafe,
+  encryptSecret
 } from '../_utils.js';
 
 export default async function handler(req, res) {
-  setCorsHeaders(res);
+  setCorsHeaders(res, req);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -16,8 +21,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Método no permitido' });
   }
 
-  const rawUser = (req.body?.username || '').trim();
-  const rawPass = req.body?.password || '';
+  // Protección contra fuerza bruta por IP (máx 10 intentos cada 5 minutos)
+  const ip = getClientIp(req);
+  const rl = checkRateLimit(`login:${ip}`, 10, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    res.setHeader('Retry-After', String(rl.retryAfterSec));
+    return res.status(429).json({
+      error: `Demasiados intentos de inicio de sesión. Intenta nuevamente en ${rl.retryAfterSec} segundos.`
+    });
+  }
+
+  const rawUser = String(req.body?.username || '').trim().slice(0, 64);
+  const rawPass = String(req.body?.password || '').slice(0, 128);
 
   if (!rawUser || !rawPass) {
     return res.status(400).json({ error: 'Ingresa tu usuario y contraseña' });
@@ -26,24 +41,26 @@ export default async function handler(req, res) {
   const expectedSuperUser = (process.env.DASHBOARD_USERNAME || 'admin').trim();
   const expectedSuperPass = process.env.DASHBOARD_PASSWORD || 'yape1234';
 
-  // 1. Acceso Maestro SUPERADMIN (Dueño de la plataforma SaaS)
-  if (rawUser.toLowerCase() === expectedSuperUser.toLowerCase() && rawPass === expectedSuperPass) {
-    const userProfile = {
+  // 1. Acceso Maestro SUPERADMIN (Comparación en tiempo constante, sin incluir api_key en JWT)
+  if (
+    safeEqualStrings(rawUser.toLowerCase(), expectedSuperUser.toLowerCase()) &&
+    safeEqualStrings(rawPass, expectedSuperPass)
+  ) {
+    const jwtClaims = {
       id: 'superadmin',
       username: expectedSuperUser,
       nombre: 'Super Administrador',
       rol: 'SUPERADMIN',
       negocio_id: null,
       nombre_comercial: 'Administración Central SaaS',
-      plan: 'ILIMITADO',
-      api_key: process.env.YAPE_API_KEY || 'mi_yape_secreto_123'
+      plan: 'ILIMITADO'
     };
-    const token = signJwt(userProfile);
+    const token = signJwt(jwtClaims);
     return res.status(200).json({
       success: true,
       mensaje: 'Bienvenido Super Administrador',
       token,
-      user: userProfile
+      user: jwtClaims
     });
   }
 
@@ -61,15 +78,22 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (userErr) {
-      // Si la tabla usuarios_negocio aún no fue creada
       if (userErr.message && userErr.message.toLowerCase().includes('usuarios_negocio')) {
         return res.status(401).json({ error: 'Credenciales inválidas' });
       }
-      return res.status(500).json({ error: userErr.message });
+      return res.status(500).json({ error: 'Error de verificación de usuario' });
     }
 
-    if (!usuario || usuario.password !== rawPass) {
+    if (!usuario || !verifyPasswordTimingSafe(usuario.password, rawPass)) {
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+    }
+
+    // Migración transparente: si la contraseña antigua estaba en texto plano, cifrarla en reposo con AES-256-GCM
+    if (usuario.password && !String(usuario.password).startsWith('enc:v1:')) {
+      await supabase
+        .from('usuarios_negocio')
+        .update({ password: encryptSecret(rawPass) })
+        .eq('id', usuario.id);
     }
 
     if (usuario.activo === false) {
@@ -78,7 +102,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Consultar el negocio asociado y validar su suscripción
     const { data: negocio, error: negErr } = await supabase
       .from('negocios')
       .select('*')
@@ -98,7 +121,8 @@ export default async function handler(req, res) {
     }
 
     const rol = (usuario.rol || 'DUENO').toUpperCase();
-    const userProfile = {
+    // JAMÁS incluimos api_key dentro del JWT almacenado en localStorage (SEC-06)
+    const jwtClaims = {
       id: usuario.id,
       username: usuario.username,
       nombre: usuario.nombre_mostrar || usuario.username,
@@ -107,24 +131,21 @@ export default async function handler(req, res) {
       nombre_comercial: negocio.nombre_comercial,
       plan: negocio.plan || 'MENSUAL',
       fecha_vencimiento: negocio.fecha_vencimiento,
-      // Solo el dueño del negocio ve la API Key, Webhook y configuración sensible
       ...(rol === 'DUENO'
         ? {
-            api_key: negocio.api_key,
-            webhook_url: negocio.webhook_url || '',
             whatsapp_alerta: negocio.whatsapp_alerta || ''
           }
         : {})
     };
 
-    const token = signJwt(userProfile);
+    const token = signJwt(jwtClaims);
     return res.status(200).json({
       success: true,
       mensaje: 'Autenticación exitosa',
       token,
-      user: userProfile
+      user: jwtClaims
     });
-  } catch (err) {
-    return res.status(500).json({ error: err.message || 'Error interno de autenticación' });
+  } catch {
+    return res.status(500).json({ error: 'Error interno de autenticación' });
   }
 }

@@ -78,6 +78,8 @@ function App() {
   const soundSettingsRef = useRef({ soundEnabled, includeSender, soundVolume });
   const userRef = useRef(currentUser);
   const tenantFilterRef = useRef(superAdminTenantFilter);
+  const knownPaymentIdsRef = useRef(new Set());
+  const sessionStartedEpochRef = useRef(Math.floor(Date.now() / 1000));
 
   const isSuperAdmin = currentUser?.rol === 'SUPERADMIN';
   const isDueno = currentUser?.rol === 'DUENO';
@@ -110,7 +112,9 @@ function App() {
   };
 
   const handleIncomingPayment = (rawPago) => {
-    if (!belongsToActiveView(rawPago)) return;
+    if (!rawPago || !belongsToActiveView(rawPago)) return;
+    if (rawPago.id != null && knownPaymentIdsRef.current.has(rawPago.id)) return;
+    if (rawPago.id != null) knownPaymentIdsRef.current.add(rawPago.id);
 
     const nuevoPago = { ...rawPago };
     if (!nuevoPago.banco) {
@@ -159,6 +163,7 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
+    knownPaymentIdsRef.current = new Set();
     fetchPayments();
 
     let cleanupRealtime = null;
@@ -173,6 +178,66 @@ function App() {
       if (socketRef.current) socketRef.current.disconnect();
     };
   }, [token, superAdminTenantFilter]);
+
+  // SEC-01: Sincronización autenticada por JWT en segundo plano.
+  // Garantiza alertas de voz, PiP y bloqueo inmediato por suspensión incluso con RLS estricto activado en Supabase.
+  useEffect(() => {
+    if (!token) return;
+    if (startDate || endDate || statusFilter !== '' || searchTerm) return;
+
+    const syncInterval = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && !soundSettingsRef.current.soundEnabled) {
+        return;
+      }
+      try {
+        const qp = new URLSearchParams();
+        if (isSuperAdmin && superAdminTenantFilter) {
+          qp.append('negocio_id', superAdminTenantFilter.id);
+        }
+        const res = await fetch(`${API_URL}/api/pagos?${qp.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        if (res.status === 401 || res.status === 403) {
+          handleLogout(data?.error || 'Tu sesión o suscripción ha expirado.');
+          return;
+        }
+        if (!res.ok || !Array.isArray(data)) return;
+
+        // Detectar pagos recién llegados que aún no han sido anunciados
+        const unseen = data
+          .filter((p) => p.id != null && !knownPaymentIdsRef.current.has(p.id))
+          .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+        for (const p of unseen) {
+          if ((p.timestamp || 0) >= sessionStartedEpochRef.current - 60) {
+            handleIncomingPayment(p);
+          } else {
+            knownPaymentIdsRef.current.add(p.id);
+          }
+        }
+
+        // Sincronizar validaciones hechas por otros cajeros/dispositivos sin parpadeo
+        const byId = new Map(data.map((p) => [p.id, p]));
+        setPayments((prev) => {
+          let changed = false;
+          const updated = prev.map((oldP) => {
+            const fresh = byId.get(oldP.id);
+            if (fresh && (fresh.validado !== oldP.validado || fresh.usuario_validador !== oldP.usuario_validador)) {
+              changed = true;
+              return { ...oldP, ...fresh };
+            }
+            return oldP;
+          });
+          return changed ? updated : prev;
+        });
+      } catch {
+        // Silencioso ante microcortes de red
+      }
+    }, 3500);
+
+    return () => clearInterval(syncInterval);
+  }, [token, isSuperAdmin, superAdminTenantFilter, startDate, endDate, statusFilter, searchTerm]);
 
   useEffect(() => {
     calculateStats();
@@ -255,6 +320,8 @@ function App() {
         };
         localStorage.setItem('yape_token', data.token);
         localStorage.setItem('yape_user', JSON.stringify(profile));
+        knownPaymentIdsRef.current = new Set();
+        sessionStartedEpochRef.current = Math.floor(Date.now() / 1000);
         setCurrentUser(profile);
         setToken(data.token);
         setActiveTab(profile.rol === 'SUPERADMIN' ? 'clientes' : 'pagos');
@@ -269,6 +336,7 @@ function App() {
   const handleLogout = (reasonMsg = '') => {
     localStorage.removeItem('yape_token');
     localStorage.removeItem('yape_user');
+    knownPaymentIdsRef.current = new Set();
     setToken('');
     setCurrentUser(null);
     setPayments([]);
@@ -306,6 +374,9 @@ function App() {
       }
 
       if (res.ok && Array.isArray(data)) {
+        data.forEach((p) => {
+          if (p.id != null) knownPaymentIdsRef.current.add(p.id);
+        });
         setPayments(data);
       }
     } catch (err) {

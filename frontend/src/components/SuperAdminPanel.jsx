@@ -40,6 +40,19 @@ ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS usuario_validador TEXT;
 ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS fecha_validacion TIMESTAMPTZ;
 ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS nota_pedido TEXT;`;
 
+const SQL_RLS_SNIPPET = `-- BLINDAJE RLS SUPABASE (Ejecutar SOLO DESPUES de poner SUPABASE_SERVICE_ROLE_KEY en Vercel)
+ALTER TABLE public.negocios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.usuarios_negocio ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pagos ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Permitir lectura publica" ON public.negocios;
+DROP POLICY IF EXISTS "Permitir lectura publica" ON public.usuarios_negocio;
+DROP POLICY IF EXISTS "Permitir lectura publica" ON public.pagos;
+
+REVOKE ALL ON TABLE public.negocios FROM anon, authenticated;
+REVOKE ALL ON TABLE public.usuarios_negocio FROM anon, authenticated;
+REVOKE ALL ON TABLE public.pagos FROM anon, authenticated;`;
+
 function isoToDateInput(isoStr) {
   if (!isoStr) return '';
   try {
@@ -53,6 +66,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
   const viewport = useDeviceViewport();
   const [negocios, setNegocios] = useState([]);
   const [schemaReady, setSchemaReady] = useState(true);
+  const [usingServiceRole, setUsingServiceRole] = useState(true);
   const [loading, setLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingNegocio, setEditingNegocio] = useState(null);
@@ -118,6 +132,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       const data = await res.json();
       if (res.ok) {
         setSchemaReady(data.schemaReady !== false);
+        setUsingServiceRole(Boolean(data.usingServiceRole));
         const list = data.negocios || [];
         setNegocios(list);
         return list;
@@ -623,6 +638,48 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Estado de Blindaje RLS / Service Role (SEC-01) */}
+      {schemaReady && !usingServiceRole && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-3.5 sm:p-4 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs sm:text-sm text-amber-900">
+            <Key className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <strong className="font-extrabold block">
+                Blindaje Final de Base de Datos (RLS): Falta configurar SUPABASE_SERVICE_ROLE_KEY en Vercel
+              </strong>
+              <span className="text-amber-800 text-xs">
+                1) En Vercel → Settings → Environment Variables agrega <code className="bg-amber-100 px-1 rounded font-bold">SUPABASE_SERVICE_ROLE_KEY</code> (tu llave <em>secret / service_role</em> de Supabase) y haz Redeploy. 2) Luego copia y ejecuta el SQL RLS en Supabase.
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={() => copyText(SQL_RLS_SNIPPET, 'sql-rls')}
+            className="bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl flex items-center justify-center gap-1.5 flex-shrink-0 shadow-sm"
+          >
+            {copiedId === 'sql-rls' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            <span>{copiedId === 'sql-rls' ? '¡SQL RLS Copiado!' : 'Copiar SQL Blindaje RLS'}</span>
+          </button>
+        </div>
+      )}
+
+      {schemaReady && usingServiceRole && (
+        <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-900">
+          <div className="flex items-center gap-2 font-semibold">
+            <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            <span>
+              Backend operando con llave privada <strong>Service Role</strong> + Cifrado AES-256-GCM activo. Si aún no cerraste el acceso público en Supabase, ejecuta el SQL RLS:
+            </span>
+          </div>
+          <button
+            onClick={() => copyText(SQL_RLS_SNIPPET, 'sql-rls')}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg flex items-center justify-center gap-1.5 flex-shrink-0"
+          >
+            {copiedId === 'sql-rls' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copiedId === 'sql-rls' ? '¡Copiado!' : 'Copiar SQL RLS'}</span>
+          </button>
         </div>
       )}
 

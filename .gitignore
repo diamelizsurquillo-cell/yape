@@ -11,8 +11,10 @@ frontend/dist
 server/public/assets
 server/public/index.html
 
-# Base de datos local
+# Base de datos local y configuración privada de escritorio
 server/data
+desktop/config-cliente.json
+desktop/alerta-temp.ps1
 
 # Logs
 npm-debug.log*
