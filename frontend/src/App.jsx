@@ -5,15 +5,17 @@ import {
   Coins, Filter, RefreshCw,
   ShieldAlert, Check, Trash2,
   Volume2, VolumeX, Settings, Play, X,
-  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink, Smartphone
+  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink, Smartphone, Download
 } from 'lucide-react';
 import { speakPayment, playChime } from './utils/soundAlert';
 import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
 import { requestNotificationPermission, showDesktopNotification } from './utils/desktopNotification';
 import { openYapeFloatingWidget, updateFloatingWidget, isPipSupported } from './utils/pipWidget';
 import { useDeviceViewport } from './utils/useDeviceViewport';
+import { usePwaInstall } from './utils/usePwaInstall';
 import SuperAdminPanel from './components/SuperAdminPanel';
 import TenantSettingsModal from './components/TenantSettingsModal';
+import PwaInstallModal from './components/PwaInstallModal';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -35,6 +37,7 @@ function loadInitialSession() {
 
 function App() {
   const viewport = useDeviceViewport();
+  const pwa = usePwaInstall();
   const initialSession = loadInitialSession();
   const [token, setToken] = useState(initialSession.token);
   const [currentUser, setCurrentUser] = useState(initialSession.user);
@@ -634,7 +637,28 @@ function App() {
               Ingresar al Panel
             </button>
           </form>
+
+          {!pwa.isStandalone && (
+            <div className="mt-5 pt-4 border-t border-gray-100 text-center">
+              <button
+                type="button"
+                onClick={() => pwa.triggerInstall()}
+                className="w-full py-2.5 px-4 rounded-xl border border-purple-200 bg-purple-50/70 hover:bg-purple-100/80 text-yape text-xs font-extrabold transition flex items-center justify-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                <span>Instalar como App en PC / Celular (Opcional)</span>
+              </button>
+            </div>
+          )}
         </div>
+
+        <PwaInstallModal
+          open={pwa.showGuideModal}
+          onClose={() => pwa.setShowGuideModal(false)}
+          platform={pwa.platform}
+          canPromptNative={pwa.canPromptNative}
+          onTriggerNativeInstall={pwa.triggerInstall}
+        />
       </div>
     );
   }
@@ -819,10 +843,22 @@ function App() {
                 </button>
               )}
 
+              {/* Botón Opcional Instalar PWA (Oculto automáticamente si ya está instalada) */}
+              {!pwa.isStandalone && (
+                <button
+                  onClick={() => pwa.triggerInstall()}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-white/15 hover:bg-white/25 text-white border-white/30"
+                  title="Instalar Aplicación Web en este dispositivo (Opcional)"
+                >
+                  <Download className="w-4 h-4" />
+                  <span className="hidden md:inline">Instalar App</span>
+                </button>
+              )}
+
               <button
                 onClick={() => setShowSoundModal(true)}
                 className="p-2 rounded-full hover:bg-white/10 transition text-white"
-                title="Configuración de Voz"
+                title="Configuración de Voz y App"
               >
                 <Settings className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
@@ -1540,6 +1576,37 @@ function App() {
                 <span>Probar Voz Yape (S/ 50.00)</span>
               </button>
 
+              {/* Sección Opcional de Aplicación Web Instalable (PWA) */}
+              <div className="p-3.5 bg-purple-50/70 rounded-xl border border-purple-200 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="font-bold text-gray-900 block text-xs sm:text-sm">
+                    Aplicación Instalable (PWA Opcional)
+                  </span>
+                  <span className="text-[11px] text-gray-600 block">
+                    {pwa.isStandalone
+                      ? 'Ya estás ejecutando el panel como Aplicación instalada.'
+                      : 'Crea un acceso directo tipo App en tu PC, Tablet o Celular.'}
+                  </span>
+                </div>
+                {pwa.isStandalone ? (
+                  <span className="text-xs font-extrabold text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-lg flex-shrink-0">
+                    ✔ Instalada
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSoundModal(false);
+                      pwa.triggerInstall();
+                    }}
+                    className="bg-white hover:bg-purple-100 text-yape border border-purple-300 font-extrabold text-xs px-3 py-2 rounded-xl flex items-center gap-1.5 flex-shrink-0 shadow-sm transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Instalar</span>
+                  </button>
+                )}
+              </div>
+
               <div className="flex justify-end pt-1">
                 <button
                   onClick={() => setShowSoundModal(false)}
@@ -1628,6 +1695,13 @@ function App() {
             </div>
           );
         })()}
+      <PwaInstallModal
+        open={pwa.showGuideModal}
+        onClose={() => pwa.setShowGuideModal(false)}
+        platform={pwa.platform}
+        canPromptNative={pwa.canPromptNative}
+        onTriggerNativeInstall={pwa.triggerInstall}
+      />
     </div>
   );
 }

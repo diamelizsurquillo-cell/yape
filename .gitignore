@@ -10,6 +10,11 @@ node_modules
 frontend/dist
 server/public/assets
 server/public/index.html
+server/public/manifest.webmanifest
+server/public/sw.js
+server/public/pwa-*.png
+server/public/pwa-icon.svg
+server/public/apple-touch-icon.png
 
 # Base de datos local y configuración privada de escritorio
 server/data

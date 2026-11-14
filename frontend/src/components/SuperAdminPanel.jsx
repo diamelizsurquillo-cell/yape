@@ -531,7 +531,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
     let msg = `✅ *BIENVENIDO A VERIFICADOR DE PAGOS YAPE / PLIN / BBVA*\n`;
     msg += `🏪 *Negocio:* ${neg.nombre_comercial}\n`;
     msg += `📅 *Plan:* ${neg.plan} (Vigente hasta: ${vencStr})\n\n`;
-    msg += `🌐 *Panel Web (PC / Tablet / Celular):*\n${originUrl}\n\n`;
+    msg += `🌐 *Panel Web o App Instalable PWA (PC / Tablet / Celular):*\n${originUrl}\n_(Opcional: toca "Instalar App" para agregarlo directo a tu Escritorio o Pantalla de Inicio)_\n\n`;
     if (dueno) {
       msg += `👑 *Acceso Dueño (Reportes y Configuración):*\n`;
       msg += `• Usuario: ${dueno.username}\n`;
