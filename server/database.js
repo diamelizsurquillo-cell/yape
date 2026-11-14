@@ -78,7 +78,13 @@ async function getDatabaseConnection() {
         'ALTER TABLE pagos ADD COLUMN codigo_seguridad TEXT;',
         "ALTER TABLE pagos ADD COLUMN banco TEXT DEFAULT 'YAPE';",
         'ALTER TABLE pagos ADD COLUMN negocio_id TEXT;',
-        'ALTER TABLE pagos ADD COLUMN nota_pedido TEXT;'
+        'ALTER TABLE pagos ADD COLUMN nota_pedido TEXT;',
+        'ALTER TABLE pagos ADD COLUMN event_uid TEXT;',
+        'ALTER TABLE negocios ADD COLUMN pairing_code TEXT;',
+        'ALTER TABLE negocios ADD COLUMN pairing_expires_at TEXT;',
+        'ALTER TABLE negocios ADD COLUMN sensor_last_seen TEXT;',
+        'ALTER TABLE negocios ADD COLUMN sensor_battery INTEGER;',
+        "ALTER TABLE negocios ADD COLUMN sensor_device_name TEXT DEFAULT '';"
     ];
     for (const stmt of alterStatements) {
         try {

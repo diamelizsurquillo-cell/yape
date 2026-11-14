@@ -7,7 +7,8 @@ import {
   decryptSecret,
   validateSafeWebhookUrl,
   sanitizeText,
-  getSecurityPosture
+  getSecurityPosture,
+  extractSensorMeta
 } from './_utils.js';
 
 function mapUserForAdmin(u) {
@@ -98,6 +99,7 @@ export default async function handler(req, res) {
 
         const enriched = (negocios || []).map((neg) => ({
           ...neg,
+          sensor_status: extractSensorMeta(neg),
           usuarios: (usuarios || [])
             .filter((u) => u.negocio_id === neg.id)
             .map(mapUserForAdmin),
@@ -132,7 +134,10 @@ export default async function handler(req, res) {
 
       return res.status(200).json({
         schemaReady: true,
-        negocio: miNegocio,
+        negocio: {
+          ...miNegocio,
+          sensor_status: extractSensorMeta(miNegocio)
+        },
         usuarios: (misUsuarios || []).map(mapUserForAdmin)
       });
     }

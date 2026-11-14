@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -36,6 +35,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -56,6 +56,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -67,8 +68,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         preferencesManager = PreferencesManager(applicationContext)
         repository = PaymentRepository(applicationContext)
-        
+
         rebindNotificationListener()
+        if (preferencesManager.getApiKey().isNotBlank()) {
+            SensorKeepAliveService.start(applicationContext)
+        }
 
         setContent {
             MaterialTheme {
@@ -84,7 +88,12 @@ class MainActivity : ComponentActivity() {
                         openAppDetails = { openAppDetailsSettings() },
                         checkBatteryOptimizations = { isBatteryOptimizationIgnored(this) },
                         requestBatteryOptimizations = { requestIgnoreBatteryOptimization() },
-                        rebindService = { rebindNotificationListener() }
+                        rebindService = {
+                            rebindNotificationListener()
+                            if (preferencesManager.getApiKey().isNotBlank()) {
+                                SensorKeepAliveService.start(applicationContext)
+                            }
+                        }
                     )
                 }
             }
@@ -94,6 +103,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         rebindNotificationListener()
+        if (preferencesManager.getApiKey().isNotBlank()) {
+            SensorKeepAliveService.start(applicationContext)
+        }
     }
 
     private fun isNotificationServiceEnabled(context: Context): Boolean {
@@ -120,7 +132,7 @@ class MainActivity : ComponentActivity() {
         try {
             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
             startActivity(intent)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(this, "No se pudo abrir la configuración de notificaciones", Toast.LENGTH_LONG).show()
         }
     }
@@ -131,7 +143,7 @@ class MainActivity : ComponentActivity() {
                 data = Uri.fromParts("package", packageName, null)
             }
             startActivity(intent)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(this, "No se pudo abrir los detalles de la aplicación", Toast.LENGTH_LONG).show()
         }
     }
@@ -147,7 +159,7 @@ class MainActivity : ComponentActivity() {
                 data = Uri.fromParts("package", packageName, null)
             }
             startActivity(intent)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(this, "No se pudo solicitar la exclusión de batería", Toast.LENGTH_LONG).show()
         }
     }
@@ -171,19 +183,21 @@ fun SensorSettingsScreen(
 
     var isPermissionGranted by remember { mutableStateOf(false) }
     var isBatteryIgnored by remember { mutableStateOf(false) }
+    var showAdvancedManual by remember { mutableStateOf(false) }
+    var pairingLoading by remember { mutableStateOf(false) }
+    var pairingCodeInput by remember { mutableStateOf("") }
 
-    val savedUrl by preferencesManager.backendUrl.collectAsState(initial = "")
+    val savedUrl by preferencesManager.backendUrl.collectAsState(initial = PreferencesManager.DEFAULT_CLOUD_URL)
     val savedApiKey by preferencesManager.apiKey.collectAsState(initial = "")
-    val dispositivoId by preferencesManager.dispositivoId.collectAsState(initial = "Generando...")
-    
+    val savedBusinessName by preferencesManager.businessName.collectAsState(initial = "")
     val liveLogs by DiagnosticLogger.logs.collectAsState()
     val isServiceConnected by DiagnosticLogger.isServiceConnected.collectAsState()
 
-    var urlInput by remember { mutableStateOf("") }
+    var urlInput by remember { mutableStateOf(PreferencesManager.DEFAULT_CLOUD_URL) }
     var apiKeyInput by remember { mutableStateOf("") }
 
     LaunchedEffect(savedUrl, savedApiKey) {
-        urlInput = savedUrl
+        urlInput = savedUrl.ifBlank { PreferencesManager.DEFAULT_CLOUD_URL }
         apiKeyInput = savedApiKey
     }
 
@@ -196,10 +210,15 @@ fun SensorSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Yape Sensor - Monitor Activo", fontWeight = FontWeight.Bold, color = Color.White) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF740099)
-                )
+                title = {
+                    Column {
+                        Text("Yape Sensor v2.0 • Blindado", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 17.sp)
+                        if (savedBusinessName.isNotBlank()) {
+                            Text("Negocio: $savedBusinessName", color = Color(0xFFE1BEE7), fontSize = 12.sp)
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF740099))
             )
         }
     ) { paddingValues ->
@@ -209,9 +228,9 @@ fun SensorSettingsScreen(
                 .padding(paddingValues)
                 .verticalScroll(scrollState)
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Card de Estado del Permiso de Notificaciones
+            // 1. Estado del Permiso Lector
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -219,26 +238,26 @@ fun SensorSettingsScreen(
                 )
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (isPermissionGranted) "LECTOR DE NOTIFICACIONES ACTIVO" else "ACCESO A NOTIFICACIONES REQUERIDO",
+                        text = if (isPermissionGranted) "1. LECTOR DE NOTIFICACIONES ACTIVO" else "1. ACTIVAR PERMISO DE NOTIFICACIONES",
                         fontWeight = FontWeight.Bold,
                         color = if (isPermissionGranted) Color(0xFF2E7D32) else Color(0xFFC62828),
-                        fontSize = 15.sp
+                        fontSize = 14.sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = if (isPermissionGranted)
-                            if (isServiceConnected) "🟢 Servicio conectado y escuchando notificaciones de Yape."
-                            else "🟡 Permiso otorgado. Si no detecta, presiona 'Re-activar' para reconectar."
+                            if (isServiceConnected) "🟢 Escuchando apps oficiales (Yape, Plin, BBVA) con filtro antifraude."
+                            else "🟡 Permiso otorgado. Toca 'Re-activar' si no detecta."
                         else
-                            "Debes otorgarle acceso a las notificaciones en el sistema Android.",
-                        fontSize = 13.sp,
+                            "Otorga permiso para detectar únicamente notificaciones bancarias oficiales.",
+                        fontSize = 12.sp,
                         color = Color.DarkGray
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -248,7 +267,7 @@ fun SensorSettingsScreen(
                                 rebindService()
                                 openSettings()
                                 scope.launch {
-                                    kotlinx.coroutines.delay(1000)
+                                    delay(1000)
                                     isPermissionGranted = checkPermission()
                                     rebindService()
                                 }
@@ -256,40 +275,38 @@ fun SensorSettingsScreen(
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
                         ) {
-                            Text(if (isPermissionGranted) "Re-activar Permiso" else "Activar Lector", color = Color.White, fontSize = 12.sp)
+                            Text(if (isPermissionGranted) "Re-activar" else "Activar Lector", color = Color.White, fontSize = 12.sp)
                         }
 
                         OutlinedButton(
                             onClick = { openAppDetails() },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Detalles de App", fontSize = 12.sp)
+                            Text("Ajustes App", fontSize = 12.sp)
                         }
                     }
                 }
             }
 
-            // Card de Estado de la Batería
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isBatteryIgnored) Color(0xFFE8F5E9) else Color(0xFFFFF9C4)
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+            // 2. Batería Sin Restricciones
+            if (!isBatteryIgnored) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF9C4))
                 ) {
-                    Text(
-                        text = if (isBatteryIgnored) "OPTIMIZACIÓN DE BATERÍA EXCLUIDA" else "OPTIMIZACIÓN DE BATERÍA DETECTADA",
-                        fontWeight = FontWeight.Bold,
-                        color = if (isBatteryIgnored) Color(0xFF2E7D32) else Color(0xFFF57F17),
-                        fontSize = 14.sp
-                    )
-                    if (!isBatteryIgnored) {
-                        Spacer(modifier = Modifier.height(6.dp))
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
                         Text(
-                            text = "Xiaomi podría cerrar el sensor. Activa el modo 'Sin Restricciones'.",
+                            text = "2. EVITAR AHORRO DE BATERÍA (XIAOMI / SAMSUNG)",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF57F17),
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Permite ejecución sin restricciones para que funcione con la pantalla apagada.",
                             fontSize = 12.sp,
                             color = Color.DarkGray
                         )
@@ -298,7 +315,7 @@ fun SensorSettingsScreen(
                             onClick = {
                                 requestBatteryOptimizations()
                                 scope.launch {
-                                    kotlinx.coroutines.delay(1000)
+                                    delay(1200)
                                     isBatteryIgnored = checkBatteryOptimizations()
                                 }
                             },
@@ -310,68 +327,150 @@ fun SensorSettingsScreen(
                 }
             }
 
-            // Formulario de Ajustes
-            OutlinedTextField(
-                value = urlInput,
-                onValueChange = { urlInput = it },
-                label = { Text("URL del Backend (POST /api/pagos)") },
-                placeholder = { Text("https://mi-servidor.vercel.app") },
+            // 3. Vinculación Rápida por Código de 6 Dígitos (Recomendado)
+            Card(
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = apiKeyInput,
-                onValueChange = { apiKeyInput = it },
-                label = { Text("API Key / Token de Seguridad") },
-                placeholder = { Text("Introduce tu clave de seguridad") },
-                modifier = Modifier.fillMaxWidth(),
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true
-            )
-
-            // Botones de Acción
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFF3E5F5))
             ) {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            preferencesManager.saveSettings(urlInput, apiKeyInput)
-                            Toast.makeText(context, "Configuración guardada", Toast.LENGTH_SHORT).show()
-                            isPermissionGranted = checkPermission()
-                            isBatteryIgnored = checkBatteryOptimizations()
-                            rebindService()
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
-                ) {
-                    Text("Guardar", color = Color.White)
-                }
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = if (savedApiKey.isNotBlank())
+                            "✅ CELULAR VINCULADO ${if (savedBusinessName.isNotBlank()) "A: $savedBusinessName" else ""}"
+                        else
+                            "⚡ VINCULAR RÁPIDO CON CÓDIGO DE 6 DÍGITOS",
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF4A148C),
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "En tu Panel Web abre 'Mi Negocio', genera tu código numérico de 6 dígitos e ingrésalo aquí:",
+                        fontSize = 12.sp,
+                        color = Color.DarkGray
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            DiagnosticLogger.log("🧪 Enviando pago de prueba manual...")
-                            repository.saveAndUploadPayment(
-                                remitente = "PAGO DE PRUEBA YAPE",
-                                monto = 1.0,
-                                timestamp = System.currentTimeMillis(),
-                                codigoSeguridad = "999"
-                            )
-                            Toast.makeText(context, "Pago de prueba enviado", Toast.LENGTH_SHORT).show()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = pairingCodeInput,
+                            onValueChange = { raw ->
+                                pairingCodeInput = raw.filter { it.isDigit() }.take(6)
+                            },
+                            label = { Text("Código 6 dígitos") },
+                            placeholder = { Text("Ej: 482915") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true
+                        )
+
+                        Button(
+                            enabled = pairingCodeInput.length == 6 && !pairingLoading,
+                            onClick = {
+                                scope.launch {
+                                    pairingLoading = true
+                                    val result = repository.redeemPairingCode(urlInput, pairingCodeInput)
+                                    pairingLoading = false
+                                    if (result.success) {
+                                        pairingCodeInput = ""
+                                        SensorKeepAliveService.start(context)
+                                        repository.sendHeartbeat()
+                                        Toast.makeText(
+                                            context,
+                                            "¡Vinculado a ${result.businessName}!",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(context, result.errorMessage, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B))
+                        ) {
+                            Text(if (pairingLoading) "..." else "Vincular", color = Color.White)
                         }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Test Conexión")
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            enabled = savedApiKey.isNotBlank(),
+                            onClick = {
+                                scope.launch {
+                                    DiagnosticLogger.log("🧪 Enviando pago de prueba firmado...")
+                                    repository.saveAndUploadPayment(
+                                        remitente = "PRUEBA SENSOR V2",
+                                        monto = 1.00,
+                                        timestamp = System.currentTimeMillis(),
+                                        codigoSeguridad = "777",
+                                        banco = "YAPE",
+                                        packageName = "com.bcp.innovacxion.yapeapp"
+                                    )
+                                    repository.sendHeartbeat()
+                                    Toast.makeText(context, "Pago de prueba S/ 1.00 enviado", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Text("Probar Envío S/ 1.00", fontSize = 12.sp)
+                        }
+
+                        TextButton(onClick = { showAdvancedManual = !showAdvancedManual }) {
+                            Text(
+                                if (showAdvancedManual) "Ocultar modo manual" else "Configuración manual",
+                                fontSize = 12.sp,
+                                color = Color(0xFF740099)
+                            )
+                        }
+                    }
+
+                    if (showAdvancedManual) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            label = { Text("URL del Servidor SaaS") },
+                            placeholder = { Text("https://yape-orcin.vercel.app") },
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = apiKeyInput,
+                            onValueChange = { apiKeyInput = it },
+                            label = { Text("API Key Manual") },
+                            placeholder = { Text("yp_live_...") },
+                            modifier = Modifier.fillMaxWidth(),
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    preferencesManager.saveSettings(urlInput, apiKeyInput)
+                                    SensorKeepAliveService.start(context)
+                                    repository.sendHeartbeat()
+                                    Toast.makeText(context, "Configuración manual guardada", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
+                        ) {
+                            Text("Guardar Manualmente", color = Color.White)
+                        }
+                    }
                 }
             }
 
-            // Card de Consola de Diagnóstico en Vivo
+            // 4. Consola de Diagnóstico en Vivo
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
@@ -383,7 +482,7 @@ fun SensorSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "📋 REGISTRO EN VIVO (DIAGNÓSTICO)",
+                            text = "📋 MONITOR ANTIFRAUDE EN VIVO",
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF81C784),
                             fontSize = 12.sp
@@ -399,13 +498,13 @@ fun SensorSettingsScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(180.dp)
+                            .height(170.dp)
                             .background(Color(0xFF121212), RoundedCornerShape(4.dp))
                             .padding(8.dp)
                     ) {
                         if (liveLogs.isEmpty()) {
                             Text(
-                                text = "Esperando notificaciones de Yape...\n(Cuando llegue un Yape o hagas un Test, verás aquí el paso a paso en tiempo real)",
+                                text = "Sensor v2.0 activo.\nEsperando notificaciones oficiales de Yape, Plin o BBVA...",
                                 color = Color.Gray,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace
@@ -420,8 +519,8 @@ fun SensorSettingsScreen(
                                 liveLogs.forEach { logLine ->
                                     Text(
                                         text = logLine,
-                                        color = if (logLine.contains("ERROR") || logLine.contains("❌") || logLine.contains("⚠️")) Color(0xFFFF8A80)
-                                                else if (logLine.contains("ÉXITO") || logLine.contains("✅") || logLine.contains("💰")) Color(0xFFB9F6CA)
+                                        color = if (logLine.contains("ERROR") || logLine.contains("❌") || logLine.contains("🛡️")) Color(0xFFFF8A80)
+                                                else if (logLine.contains("ÉXITO") || logLine.contains("✅") || logLine.contains("🚀") || logLine.contains("💰")) Color(0xFFB9F6CA)
                                                 else Color(0xFFE0E0E0),
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,

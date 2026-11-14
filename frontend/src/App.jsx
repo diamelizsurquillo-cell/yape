@@ -75,6 +75,7 @@ function App() {
     typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
   );
   const [activeToast, setActiveToast] = useState(null);
+  const [sensorStatus, setSensorStatus] = useState(null);
   const toastTimeoutRef = useRef(null);
 
   const socketRef = useRef(null);
@@ -200,6 +201,12 @@ function App() {
         const res = await fetch(`${API_URL}/api/pagos?${qp.toString()}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        const sensorHdr = res.headers.get('X-Sensor-Status');
+        if (sensorHdr) {
+          try {
+            setSensorStatus(JSON.parse(sensorHdr));
+          } catch {}
+        }
         const data = await res.json();
         if (res.status === 401 || res.status === 403) {
           handleLogout(data?.error || 'Tu sesión o suscripción ha expirado.');
@@ -343,6 +350,7 @@ function App() {
     setToken('');
     setCurrentUser(null);
     setPayments([]);
+    setSensorStatus(null);
     setSuperAdminTenantFilter(null);
     if (reasonMsg && typeof reasonMsg === 'string') {
       setLoginError(reasonMsg);
@@ -369,6 +377,15 @@ function App() {
       const res = await fetch(`${API_URL}/api/pagos?${queryParams.toString()}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+
+      const sensorHdr = res.headers.get('X-Sensor-Status');
+      if (sensorHdr) {
+        try {
+          setSensorStatus(JSON.parse(sensorHdr));
+        } catch {}
+      } else if (isSuperAdmin && !superAdminTenantFilter) {
+        setSensorStatus(null);
+      }
 
       const data = await res.json();
       if (res.status === 401 || res.status === 403) {
@@ -733,14 +750,42 @@ function App() {
               >
                 {currentUser?.rol === 'DUENO' ? 'DUEÑO' : currentUser?.rol || 'ADMIN'}
               </span>
-              {/* Indicador automático de tipo de monitor detectado */}
-              <span
-                className="hidden xl:inline-flex items-center gap-1 text-[10px] font-semibold bg-white/15 text-white/95 px-2 py-0.5 rounded-full border border-white/20 flex-shrink-0"
-                title={`Resolución detectada: ${viewport.resolutionText}`}
-              >
-                <Smartphone className="w-3 h-3" />
-                {viewport.deviceLabel}
-              </span>
+              {/* Indicador en Vivo de Salud del Celular Receptor (Sensor v2.0) */}
+              {(!isSuperAdmin || superAdminTenantFilter) && sensorStatus && (
+                <span
+                  className={`inline-flex items-center gap-1.5 text-[10px] sm:text-xs font-bold px-2.5 py-0.5 rounded-full border flex-shrink-0 ${
+                    sensorStatus.online
+                      ? 'bg-emerald-500/25 text-emerald-100 border-emerald-300/50'
+                      : sensorStatus.seconds_ago !== null
+                      ? 'bg-amber-500/30 text-amber-100 border-amber-300/60'
+                      : 'bg-white/10 text-white/75 border-white/20'
+                  }`}
+                  title={
+                    sensorStatus.online
+                      ? `Celular receptor activo${sensorStatus.device_name ? ` (${sensorStatus.device_name})` : ''}${sensorStatus.battery != null ? ` • Batería ${sensorStatus.battery}%` : ''}`
+                      : sensorStatus.seconds_ago !== null
+                      ? `El celular receptor no reporta señal hace ${Math.max(1, Math.floor(sensorStatus.seconds_ago / 60))} min. Verifica que tenga internet.`
+                      : 'Aún no se ha vinculado el celular receptor'
+                  }
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      sensorStatus.online
+                        ? 'bg-emerald-400 animate-pulse'
+                        : sensorStatus.seconds_ago !== null
+                        ? 'bg-amber-400'
+                        : 'bg-gray-300'
+                    }`}
+                  ></span>
+                  <span>
+                    {sensorStatus.online
+                      ? `Celular ON${sensorStatus.battery != null ? ` ${sensorStatus.battery}%` : ''}`
+                      : sensorStatus.seconds_ago !== null
+                      ? 'Celular sin señal'
+                      : 'Sin vincular'}
+                  </span>
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">

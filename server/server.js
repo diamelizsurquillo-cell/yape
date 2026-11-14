@@ -160,6 +160,51 @@ function generateTenantApiKey() {
     return `yp_live_${crypto.randomBytes(16).toString('hex')}`;
 }
 
+function deriveTenantHmacSecret(apiKey) {
+    return crypto
+        .createHmac('sha256', JWT_SECRET)
+        .update(`yape-sensor-hmac-v2:${String(apiKey || '')}`)
+        .digest('hex');
+}
+
+function verifySensorHmac({ apiKey, reqTimestamp, canonicalMessage, signatureHex }) {
+    const sig = String(signatureHex || '').trim().toLowerCase();
+    if (!sig) return { verified: false, provided: false };
+    const tsNum = parseInt(String(reqTimestamp || '0'), 10);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(tsNum) || Math.abs(nowSec - tsNum) > 300) {
+        return { verified: false, provided: true, error: 'Firma del sensor expirada.' };
+    }
+    const secret = deriveTenantHmacSecret(apiKey);
+    const expected = crypto.createHmac('sha256', secret).update(canonicalMessage, 'utf8').digest('hex');
+    if (!safeEqualStrings(sig, expected)) {
+        return { verified: false, provided: true, error: 'Firma criptográfica HMAC-SHA256 inválida.' };
+    }
+    return { verified: true, provided: true };
+}
+
+function extractSensorMeta(neg) {
+    if (!neg) return { online: false, seconds_ago: null, sensor_battery: null, sensor_device_name: '' };
+    let online = false;
+    let seconds_ago = null;
+    if (neg.sensor_last_seen) {
+        const ms = new Date(neg.sensor_last_seen).getTime();
+        if (!isNaN(ms)) {
+            seconds_ago = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+            online = seconds_ago <= 180;
+        }
+    }
+    return {
+        pairing_code: neg.pairing_code || null,
+        pairing_expires_at: neg.pairing_expires_at || null,
+        sensor_last_seen: neg.sensor_last_seen || null,
+        sensor_battery: neg.sensor_battery ?? null,
+        sensor_device_name: neg.sensor_device_name || '',
+        online,
+        seconds_ago
+    };
+}
+
 function checkBusinessSubscription(negocio) {
     if (!negocio) return { valid: false, reason: 'Negocio no encontrado' };
     if ((negocio.estado || 'ACTIVO').toUpperCase() !== 'ACTIVO') {
@@ -375,6 +420,7 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 
                 const enriched = negocios.map((n) => ({
                     ...n,
+                    sensor_status: extractSensorMeta(n),
                     usuarios: usuarios.filter((u) => u.negocio_id === n.id).map(mapUserForAdmin),
                     total_pagos: statsMap[n.id]?.total_pagos || 0,
                     volumen_soles: statsMap[n.id]?.volumen_soles || 0
@@ -390,7 +436,7 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
             );
             return res.json({
                 schemaReady: true,
-                negocio: miNegocio,
+                negocio: miNegocio ? { ...miNegocio, sensor_status: extractSensorMeta(miNegocio) } : null,
                 usuarios: misUsuarios.map(mapUserForAdmin)
             });
         }
@@ -660,6 +706,120 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 });
 
 // ==========================================
+// 2B. VINCULACIÓN 6 DÍGITOS Y HEARTBEAT (/api/pair)
+// ==========================================
+app.put('/api/pair', async (req, res) => {
+    const ip = req.ip || 'local';
+    const rl = checkRateLimit(`pair-redeem:${ip}`, 8, 5 * 60 * 1000);
+    if (!rl.allowed) return res.status(429).json({ error: 'Demasiados intentos. Espera unos minutos.' });
+
+    const rawCode = String(req.body?.codigo || '').replace(/[^0-9]/g, '');
+    const deviceName = sanitizeText(req.body?.device_name || 'Android Sensor', 60);
+    if (rawCode.length !== 6) return res.status(400).json({ error: 'Ingresa un código de 6 dígitos.' });
+
+    try {
+        const db = await getDatabaseConnection();
+        const neg = await db.get('SELECT * FROM negocios WHERE pairing_code = ?', [rawCode]);
+        if (!neg || !neg.pairing_expires_at || new Date(neg.pairing_expires_at).getTime() <= Date.now()) {
+            return res.status(404).json({ error: 'Código inválido o expirado.' });
+        }
+        const sub = checkBusinessSubscription(neg);
+        if (!sub.valid) return res.status(403).json({ error: sub.reason });
+
+        const nowIso = new Date().toISOString();
+        await db.run(
+            'UPDATE negocios SET pairing_code = NULL, pairing_expires_at = NULL, sensor_last_seen = ?, sensor_device_name = ? WHERE id = ?',
+            [nowIso, deviceName, neg.id]
+        );
+
+        const backendUrl = `${req.protocol}://${req.get('host')}`;
+        return res.json({
+            success: true,
+            backend_url: backendUrl,
+            api_key: neg.api_key,
+            hmac_secret: deriveTenantHmacSecret(neg.api_key),
+            nombre_comercial: neg.nombre_comercial
+        });
+    } catch {
+        return res.status(500).json({ error: 'Error interno al vincular' });
+    }
+});
+
+app.patch('/api/pair', async (req, res) => {
+    const apiKey = String(req.headers['x-api-key'] || '').trim();
+    if (!apiKey) return res.status(401).json({ error: 'X-API-Key requerida' });
+
+    try {
+        const db = await getDatabaseConnection();
+        const neg = await db.get('SELECT * FROM negocios WHERE api_key = ?', [apiKey]);
+        if (!neg) return res.status(401).json({ error: 'API Key inválida' });
+
+        const batteryRaw = req.body?.battery;
+        const battery =
+            batteryRaw !== undefined && batteryRaw !== null && Number.isFinite(Number(batteryRaw))
+                ? Math.max(0, Math.min(100, Math.round(Number(batteryRaw))))
+                : null;
+        const deviceName = sanitizeText(req.body?.device_name || '', 60);
+
+        const sigHeader = req.headers['x-signature-256'];
+        const tsHeader = req.headers['x-request-timestamp'];
+        if (sigHeader) {
+            const canonical = `${tsHeader}|heartbeat|${battery ?? -1}|${deviceName}`;
+            const check = verifySensorHmac({
+                apiKey,
+                reqTimestamp: tsHeader,
+                canonicalMessage: canonical,
+                signatureHex: sigHeader
+            });
+            if (!check.verified) return res.status(401).json({ error: check.error });
+        }
+
+        await db.run(
+            'UPDATE negocios SET sensor_last_seen = ?, sensor_battery = COALESCE(?, sensor_battery), sensor_device_name = CASE WHEN ? != "" THEN ? ELSE sensor_device_name END WHERE id = ?',
+            [new Date().toISOString(), battery, deviceName, deviceName, neg.id]
+        );
+
+        return res.json({
+            ok: true,
+            server_time: Math.floor(Date.now() / 1000),
+            hmac_secret: !sigHeader ? deriveTenantHmacSecret(neg.api_key) : undefined
+        });
+    } catch {
+        return res.status(500).json({ error: 'Error interno' });
+    }
+});
+
+app.post('/api/pair', verifyJwtToken, async (req, res) => {
+    if (req.user.rol !== 'SUPERADMIN' && req.user.rol !== 'DUENO') {
+        return res.status(403).json({ error: 'No autorizado' });
+    }
+    const targetId = req.user.rol === 'SUPERADMIN' ? (req.body?.negocio_id || req.user.negocio_id) : req.user.negocio_id;
+    if (!targetId) return res.status(400).json({ error: 'negocio_id requerido' });
+
+    const codigo = String(crypto.randomInt(100000, 999999));
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const db = await getDatabaseConnection();
+    await db.run('UPDATE negocios SET pairing_code = ?, pairing_expires_at = ? WHERE id = ?', [codigo, expiresAt, targetId]);
+    return res.status(201).json({ codigo, expires_at: expiresAt, expires_in_sec: 600 });
+});
+
+app.get('/api/pair', verifyJwtToken, async (req, res) => {
+    const targetId = req.user.rol === 'SUPERADMIN' ? (req.query?.negocio_id || req.user.negocio_id) : req.user.negocio_id;
+    if (!targetId) return res.json({ online: false, configured: false });
+    const db = await getDatabaseConnection();
+    const neg = await db.get('SELECT * FROM negocios WHERE id = ?', [targetId]);
+    if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
+    const meta = extractSensorMeta(neg);
+    return res.json({
+        online: meta.online,
+        last_seen: meta.sensor_last_seen,
+        seconds_ago: meta.seconds_ago,
+        battery: meta.sensor_battery,
+        device_name: meta.sensor_device_name
+    });
+});
+
+// ==========================================
 // 3. RECEPCIÓN Y GESTIÓN DE PAGOS (/api/pagos)
 // ==========================================
 app.post('/api/pagos', async (req, res) => {
@@ -674,8 +834,9 @@ app.post('/api/pagos', async (req, res) => {
         return res.status(401).json({ error: 'API Key ausente en cabecera X-API-Key' });
     }
 
-    const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body || {};
+    const { remitente, monto, timestamp, codigo_seguridad, banco, event_uid } = req.body || {};
     const cleanRemitente = sanitizeText(remitente, 100);
+    const cleanEventUid = sanitizeText(event_uid || '', 80);
     const numMonto = Number(monto);
     const rawTs = parseInt(timestamp, 10);
 
@@ -699,7 +860,6 @@ app.post('/api/pagos', async (req, res) => {
         const nowSec = Math.floor(Date.now() / 1000);
         let safeTimestamp = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : nowSec;
         if (safeTimestamp > 9999999999) safeTimestamp = Math.floor(safeTimestamp / 1000);
-        if (safeTimestamp > nowSec + 300) safeTimestamp = nowSec;
 
         const rawBanco = sanitizeText(banco || 'YAPE', 12).toUpperCase();
         const bankName = ['YAPE', 'PLIN', 'BBVA'].includes(rawBanco) ? rawBanco : 'YAPE';
@@ -707,7 +867,36 @@ app.post('/api/pagos', async (req, res) => {
         const negId = targetNegocio ? targetNegocio.id : null;
         const cleanAmount = Math.round(numMonto * 100) / 100;
 
-        // Deduplicación anti-replay (20 segundos)
+        // Verificar firma HMAC-SHA256 del Sensor v2.0 si está presente
+        const sigHeader = req.headers['x-signature-256'];
+        const reqTsHeader = req.headers['x-request-timestamp'];
+        if (sigHeader) {
+            const canonical = `${reqTsHeader}|${cleanEventUid}|${bankName}|${numMonto.toFixed(2)}|${safeTimestamp}|${cleanRemitente}`;
+            const hmacCheck = verifySensorHmac({
+                apiKey,
+                reqTimestamp: reqTsHeader,
+                canonicalMessage: canonical,
+                signatureHex: sigHeader
+            });
+            if (!hmacCheck.verified) {
+                return res.status(401).json({ error: hmacCheck.error });
+            }
+        }
+
+        if (safeTimestamp > nowSec + 300) safeTimestamp = nowSec;
+
+        // 1) Deduplicación exacta por event_uid
+        if (cleanEventUid) {
+            const existingUid = await db.get(
+                `SELECT * FROM pagos WHERE COALESCE(negocio_id, '') = COALESCE(?, '') AND event_uid = ? LIMIT 1`,
+                [negId, cleanEventUid]
+            );
+            if (existingUid) {
+                return res.status(200).json({ message: 'Pago ya registrado (idempotencia event_uid)', duplicate_ignored: true, pago: existingUid });
+            }
+        }
+
+        // 2) Deduplicación anti-replay temporal (20 segundos)
         const dup = await db.get(
             `SELECT * FROM pagos
              WHERE COALESCE(negocio_id, '') = COALESCE(?, '')
@@ -723,10 +912,14 @@ app.post('/api/pagos', async (req, res) => {
         }
 
         const result = await db.run(
-            `INSERT INTO pagos (negocio_id, remitente, monto, timestamp, codigo_seguridad, banco, validado)
-             VALUES (?, ?, ?, ?, ?, ?, 0)`,
-            [negId, cleanRemitente, cleanAmount, safeTimestamp, codSeg, bankName]
+            `INSERT INTO pagos (negocio_id, remitente, monto, timestamp, codigo_seguridad, banco, validado, event_uid)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+            [negId, cleanRemitente, cleanAmount, safeTimestamp, codSeg, bankName, cleanEventUid || null]
         );
+
+        if (targetNegocio) {
+            await db.run('UPDATE negocios SET sensor_last_seen = ? WHERE id = ?', [new Date().toISOString(), targetNegocio.id]);
+        }
 
         const newPayment = await db.get('SELECT * FROM pagos WHERE id = ?', [result.lastID]);
         emitToTenantAndSuperAdmin('nuevo_pago', newPayment, negId);
@@ -825,6 +1018,25 @@ app.get('/api/pagos', async (req, res, next) => {
 
         query += ' ORDER BY timestamp DESC LIMIT 500';
         const pagos = await db.all(query, params);
+
+        const targetNegForMeta = !isSuperAdmin ? req.user.negocio_id : (filterNegId && filterNegId !== 'MASTER' ? filterNegId : null);
+        if (targetNegForMeta) {
+            const negMetaRow = await db.get('SELECT * FROM negocios WHERE id = ?', [targetNegForMeta]);
+            if (negMetaRow) {
+                const m = extractSensorMeta(negMetaRow);
+                res.setHeader('Access-Control-Expose-Headers', 'X-Sensor-Status');
+                res.setHeader(
+                    'X-Sensor-Status',
+                    JSON.stringify({
+                        online: m.online,
+                        battery: m.sensor_battery,
+                        seconds_ago: m.seconds_ago,
+                        device_name: m.sensor_device_name
+                    })
+                );
+            }
+        }
+
         return res.json(pagos);
     } catch (error) {
         console.error('Error al consultar pagos:', error);

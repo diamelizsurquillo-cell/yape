@@ -7,7 +7,10 @@ import {
   sanitizeText,
   safeEqualStrings,
   getClientIp,
-  checkRateLimit
+  checkRateLimit,
+  verifySensorHmac,
+  extractSensorMeta,
+  updateSensorMetaInSupabase
 } from './_utils.js';
 
 function enrichBankField(p) {
@@ -116,9 +119,10 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: 'API Key inválida o negocio no registrado' });
     }
 
-    const { remitente, monto, timestamp, codigo_seguridad, banco } = req.body || {};
+    const { remitente, monto, timestamp, codigo_seguridad, banco, event_uid } = req.body || {};
 
     const cleanRemitente = sanitizeText(remitente, 100);
+    const cleanEventUid = sanitizeText(event_uid || '', 80);
     const numMonto = Number(monto);
     const rawTs = parseInt(timestamp, 10);
 
@@ -134,16 +138,51 @@ export default async function handler(req, res) {
     if (safeTimestamp > 9999999999) {
       safeTimestamp = Math.floor(safeTimestamp / 1000);
     }
-    if (safeTimestamp > nowSec + 300) {
-      safeTimestamp = nowSec;
-    }
 
     const rawBanco = sanitizeText(banco || 'YAPE', 12).toUpperCase();
     const bankName = ['YAPE', 'PLIN', 'BBVA'].includes(rawBanco) ? rawBanco : 'YAPE';
     const codSeguridad =
       sanitizeText(codigo_seguridad, 16) || (bankName === 'BBVA' ? 'BBVA' : null);
 
-    // Protección Anti-Duplicados / Anti-Replay (ventana de 20 segundos)
+    // Sensor v2.0: Verificación criptográfica HMAC-SHA256 por petición
+    const sigHeader = req.headers['x-signature-256'];
+    const reqTsHeader = req.headers['x-request-timestamp'];
+    if (sigHeader) {
+      const canonical = `${reqTsHeader}|${cleanEventUid}|${bankName}|${numMonto.toFixed(2)}|${safeTimestamp}|${cleanRemitente}`;
+      const hmacCheck = verifySensorHmac({
+        apiKey,
+        reqTimestamp: reqTsHeader,
+        canonicalMessage: canonical,
+        signatureHex: sigHeader
+      });
+      if (!hmacCheck.verified) {
+        return res.status(401).json({ error: hmacCheck.error });
+      }
+    }
+
+    if (safeTimestamp > nowSec + 300) {
+      safeTimestamp = nowSec;
+    }
+
+    // 1) Deduplicación exacta por event_uid determinístico (Sensor v2.0)
+    if (cleanEventUid) {
+      try {
+        let uidQuery = supabase.from('pagos').select('*').eq('event_uid', cleanEventUid).limit(1);
+        if (targetNegocio) uidQuery = uidQuery.eq('negocio_id', targetNegocio.id);
+        const { data: exactMatch, error: uidErr } = await uidQuery;
+        if (!uidErr && exactMatch && exactMatch.length > 0) {
+          return res.status(200).json({
+            mensaje: 'Pago ya registrado previamente (idempotencia event_uid)',
+            duplicate_ignored: true,
+            pago: exactMatch[0]
+          });
+        }
+      } catch {
+        // Si aún no agregaron columna event_uid, cae al filtro temporal de 20s
+      }
+    }
+
+    // 2) Protección Anti-Duplicados / Anti-Replay temporal (ventana de 20 segundos)
     try {
       let dupQuery = supabase
         .from('pagos')
@@ -181,6 +220,7 @@ export default async function handler(req, res) {
       codigo_seguridad: codSeguridad,
       banco: bankName,
       validado: 0,
+      ...(cleanEventUid ? { event_uid: cleanEventUid } : {}),
       ...(targetNegocio ? { negocio_id: targetNegocio.id } : {})
     };
 
@@ -192,7 +232,12 @@ export default async function handler(req, res) {
 
     if (error && error.message) {
       const lowerMsg = error.message.toLowerCase();
-      if (lowerMsg.includes('negocio_id') || lowerMsg.includes('banco')) {
+      if (lowerMsg.includes('event_uid')) {
+        const { event_uid: _omit, ...withoutUid } = payload;
+        const retryUid = await supabase.from('pagos').insert([withoutUid]).select().single();
+        data = retryUid.data;
+        error = retryUid.error;
+      } else if (lowerMsg.includes('negocio_id') || lowerMsg.includes('banco')) {
         const fallbackPayload = {
           remitente: cleanRemitente,
           monto: payload.monto,
@@ -212,8 +257,13 @@ export default async function handler(req, res) {
 
     const finalPago = data || { ...payload, id: Date.now() };
 
-    if (targetNegocio && targetNegocio.webhook_url) {
-      await dispatchWebhookIfConfigured(targetNegocio, finalPago);
+    if (targetNegocio) {
+      await updateSensorMetaInSupabase(supabase, targetNegocio, {
+        sensor_last_seen: new Date().toISOString()
+      });
+      if (targetNegocio.webhook_url) {
+        await dispatchWebhookIfConfigured(targetNegocio, finalPago);
+      }
     }
 
     return res.status(201).json({
@@ -278,10 +328,12 @@ export default async function handler(req, res) {
   const isSuperAdmin = authUser.rol === 'SUPERADMIN';
   const isCajero = authUser.rol === 'CAJERO';
 
+  let activeSensorMeta = null;
+
   if (!isSuperAdmin && authUser.negocio_id) {
     const { data: negActual } = await supabase
       .from('negocios')
-      .select('id, estado, fecha_vencimiento')
+      .select('*')
       .eq('id', authUser.negocio_id)
       .maybeSingle();
 
@@ -293,7 +345,29 @@ export default async function handler(req, res) {
           subscription_expired: true
         });
       }
+      activeSensorMeta = extractSensorMeta(negActual);
     }
+  } else if (isSuperAdmin && req.query?.negocio_id && req.query.negocio_id !== 'MASTER') {
+    const { data: negFiltered } = await supabase
+      .from('negocios')
+      .select('*')
+      .eq('id', req.query.negocio_id)
+      .maybeSingle();
+    if (negFiltered) {
+      activeSensorMeta = extractSensorMeta(negFiltered);
+    }
+  }
+
+  if (activeSensorMeta) {
+    res.setHeader(
+      'X-Sensor-Status',
+      JSON.stringify({
+        online: activeSensorMeta.online,
+        battery: activeSensorMeta.sensor_battery,
+        seconds_ago: activeSensorMeta.seconds_ago,
+        device_name: activeSensorMeta.sensor_device_name
+      })
+    );
   }
 
   // =========================================================================

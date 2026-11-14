@@ -12,8 +12,8 @@ android {
         applicationId = "com.minegocio.yapesensor"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -64,8 +64,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.8.2")
 
-    // DataStore Preferences
+    // DataStore Preferences & Android Keystore Encryption (Sensor v2.0)
     implementation("androidx.datastore:datastore-preferences:1.0.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Room Database
     val roomVersion = "2.6.1"

@@ -11,8 +11,11 @@ interface PendingPaymentDao {
     @Query("SELECT * FROM pending_payments ORDER BY timestamp ASC")
     suspend fun getAllPending(): List<PendingPayment>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(payment: PendingPayment)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(payment: PendingPayment): Long
+
+    @Query("DELETE FROM pending_payments WHERE eventUid = :eventUid")
+    suspend fun deleteByEventUid(eventUid: String)
 
     @Delete
     suspend fun delete(payment: PendingPayment)

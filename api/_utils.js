@@ -158,11 +158,12 @@ export function setCorsHeaders(res, req) {
   const origin = req?.headers?.origin || '*';
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-Requested-With, Accept, Content-Type, X-API-Key, Authorization'
+    'X-Requested-With, Accept, Content-Type, X-API-Key, Authorization, X-Signature-256, X-Request-Timestamp'
   );
+  res.setHeader('Access-Control-Expose-Headers', 'X-Sensor-Status');
   // Hardening HTTP Security Headers (OWASP)
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -308,6 +309,142 @@ export function getSupabaseClient() {
 
 export function generateTenantApiKey() {
   return `yp_live_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+// Secreto HMAC exclusivo por cliente derivado criptográficamente (Sensor v2.0)
+export function deriveTenantHmacSecret(apiKey) {
+  return crypto
+    .createHmac('sha256', getJwtSecret())
+    .update(`yape-sensor-hmac-v2:${String(apiKey || '')}`)
+    .digest('hex');
+}
+
+export function computeHmacSha256Hex(secretHexOrStr, canonicalMessage) {
+  return crypto
+    .createHmac('sha256', String(secretHexOrStr || ''))
+    .update(String(canonicalMessage || ''), 'utf8')
+    .digest('hex');
+}
+
+export function verifySensorHmac({ apiKey, reqTimestamp, canonicalMessage, signatureHex }) {
+  const sig = String(signatureHex || '').trim().toLowerCase();
+  if (!sig) return { verified: false, provided: false };
+
+  const tsNum = parseInt(String(reqTimestamp || '0'), 10);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(tsNum) || Math.abs(nowSec - tsNum) > 300) {
+    return {
+      verified: false,
+      provided: true,
+      error: 'Firma del sensor expirada (desfase de reloj mayor a 5 minutos).'
+    };
+  }
+
+  const secret = deriveTenantHmacSecret(apiKey);
+  const expected = computeHmacSha256Hex(secret, canonicalMessage);
+  if (!safeEqualStrings(sig, expected)) {
+    return {
+      verified: false,
+      provided: true,
+      error: 'Firma criptográfica HMAC-SHA256 inválida.'
+    };
+  }
+
+  return { verified: true, provided: true };
+}
+
+// Lectura/escritura resiliente de telemetría y código de 6 dígitos (soporta esquema con o sin migración v2)
+export function extractSensorMeta(negocio) {
+  if (!negocio) {
+    return {
+      pairing_code: null,
+      pairing_expires_at: null,
+      sensor_last_seen: null,
+      sensor_battery: null,
+      sensor_device_name: '',
+      online: false,
+      seconds_ago: null
+    };
+  }
+
+  let fallback = {};
+  const rawTg = String(negocio.telegram_chat_id || '');
+  if (rawTg.startsWith('{') && rawTg.endsWith('}')) {
+    try {
+      fallback = JSON.parse(rawTg);
+    } catch {
+      fallback = {};
+    }
+  }
+
+  const pairing_code = negocio.pairing_code ?? fallback.pair ?? null;
+  const pairing_expires_at = negocio.pairing_expires_at ?? fallback.exp ?? null;
+  const sensor_last_seen = negocio.sensor_last_seen ?? fallback.seen ?? null;
+  const rawBat = negocio.sensor_battery ?? fallback.bat ?? null;
+  const sensor_battery =
+    rawBat !== null && rawBat !== undefined && Number.isFinite(Number(rawBat))
+      ? Math.max(0, Math.min(100, Math.round(Number(rawBat))))
+      : null;
+  const sensor_device_name = negocio.sensor_device_name || fallback.dev || '';
+
+  let online = false;
+  let seconds_ago = null;
+  if (sensor_last_seen) {
+    const seenMs = new Date(sensor_last_seen).getTime();
+    if (!isNaN(seenMs)) {
+      seconds_ago = Math.max(0, Math.floor((Date.now() - seenMs) / 1000));
+      online = seconds_ago <= 180; // En línea si reportó en los últimos 3 minutos
+    }
+  }
+
+  return {
+    pairing_code,
+    pairing_expires_at,
+    sensor_last_seen,
+    sensor_battery,
+    sensor_device_name,
+    online,
+    seconds_ago
+  };
+}
+
+export async function updateSensorMetaInSupabase(supabase, negocio, patch) {
+  const current = extractSensorMeta(negocio);
+  const merged = {
+    pairing_code: patch.pairing_code !== undefined ? patch.pairing_code : current.pairing_code,
+    pairing_expires_at:
+      patch.pairing_expires_at !== undefined ? patch.pairing_expires_at : current.pairing_expires_at,
+    sensor_last_seen:
+      patch.sensor_last_seen !== undefined ? patch.sensor_last_seen : current.sensor_last_seen,
+    sensor_battery:
+      patch.sensor_battery !== undefined ? patch.sensor_battery : current.sensor_battery,
+    sensor_device_name:
+      patch.sensor_device_name !== undefined ? patch.sensor_device_name : current.sensor_device_name
+  };
+
+  // Intentar primero en columnas nativas v2
+  const { error } = await supabase
+    .from('negocios')
+    .update(merged)
+    .eq('id', negocio.id);
+
+  if (!error) return { ok: true };
+
+  // Fallback automático en telegram_chat_id si el usuario aún no corrió supabase_device_pairing_migration.sql
+  const compactFallback = JSON.stringify({
+    pair: merged.pairing_code,
+    exp: merged.pairing_expires_at,
+    seen: merged.sensor_last_seen,
+    bat: merged.sensor_battery,
+    dev: merged.sensor_device_name
+  });
+
+  const retry = await supabase
+    .from('negocios')
+    .update({ telegram_chat_id: compactFallback })
+    .eq('id', negocio.id);
+
+  return { ok: !retry.error, error: retry.error };
 }
 
 export function sanitizeText(str, maxLength = 100) {

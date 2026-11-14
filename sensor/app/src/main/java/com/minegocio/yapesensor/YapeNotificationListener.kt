@@ -79,6 +79,9 @@ class YapeNotificationListener : NotificationListenerService() {
         super.onListenerConnected()
         Log.i(TAG, "Listener CONECTADO exitosamente al sistema.")
         DiagnosticLogger.setServiceConnected(true)
+        if (preferences.getApiKey().isNotBlank()) {
+            SensorKeepAliveService.start(applicationContext)
+        }
     }
 
     override fun onListenerDisconnected() {
@@ -171,7 +174,8 @@ class YapeNotificationListener : NotificationListenerService() {
                     monto = parsed.monto,
                     timestamp = parsed.timestamp,
                     codigoSeguridad = parsed.codigoSeguridad,
-                    banco = parsed.banco
+                    banco = parsed.banco,
+                    packageName = normalizedPkg
                 )
             }
         } else {

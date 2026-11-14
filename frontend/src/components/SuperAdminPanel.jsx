@@ -75,6 +75,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
   const [errorMsg, setErrorMsg] = useState('');
   const [actionMsg, setActionMsg] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+  const [clientPairCode, setClientPairCode] = useState('');
 
   const [form, setForm] = useState({
     nombre_comercial: '',
@@ -149,6 +150,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
 
   const openEditClientModal = (neg, defaultTab = 'datos') => {
     setEditingNegocio(neg);
+    setClientPairCode('');
     setEditTab(defaultTab);
     setEditForm({
       nombre_comercial: neg.nombre_comercial || '',
@@ -219,6 +221,29 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       alert('Error de red al guardar cambios');
     } finally {
       setSavingEdit(false);
+    }
+  };
+
+  const handleGenerateClientPairCode = async () => {
+    if (!editingNegocio) return;
+    try {
+      const res = await fetch(`${apiUrl}/api/pair`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ negocio_id: editingNegocio.id })
+      });
+      const data = await res.json();
+      if (res.ok && data.codigo) {
+        setClientPairCode(data.codigo);
+        showTempMessage(`Código de 6 dígitos generado: ${data.codigo} (válido por 10 min).`);
+      } else {
+        alert(data.error || 'No se pudo generar código');
+      }
+    } catch {
+      alert('Error de red al generar código de vinculación');
     }
   };
 
@@ -937,6 +962,19 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                         <div className="text-[11px] text-gray-400 mt-1">
                           Vence: {new Date(neg.fecha_vencimiento).toLocaleDateString('es-PE')}
                         </div>
+                        {neg.sensor_status?.online ? (
+                          <div className="text-[11px] font-bold text-emerald-700 mt-1 flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span>
+                              Celular ON
+                              {neg.sensor_status.battery != null ? ` (${neg.sensor_status.battery}%)` : ''}
+                            </span>
+                          </div>
+                        ) : neg.sensor_status?.sensor_last_seen ? (
+                          <div className="text-[11px] font-semibold text-amber-600 mt-1">
+                            🟡 Celular sin señal
+                          </div>
+                        ) : null}
                       </td>
 
                       <td className="px-5 py-3.5">
@@ -1433,13 +1471,20 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
             ) : (
               /* PESTAÑA 2: EDITAR USUARIOS, CONTRASEÑAS Y API KEY */
               <div className="p-4 sm:p-6 overflow-y-auto modal-scroll flex-1 space-y-4 pb-safe">
-                {/* API Key */}
-                <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                {/* API Key y Código de 6 Dígitos */}
+                <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-bold text-gray-700 uppercase flex items-center gap-1">
-                      <Key className="w-3.5 h-3.5 text-yape" /> API Key del Sensor Android
+                      <Key className="w-3.5 h-3.5 text-yape" /> Vincular Sensor Android v2.0
                     </span>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleGenerateClientPairCode}
+                        className="text-xs font-extrabold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded-lg"
+                      >
+                        ⚡ Generar Código 6 Dígitos
+                      </button>
                       <button
                         type="button"
                         onClick={() =>
@@ -1461,6 +1506,16 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                   <code className="block text-xs bg-white p-2 rounded border border-gray-200 break-all text-gray-800">
                     {editingNegocio.api_key}
                   </code>
+                  {clientPairCode && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+                      <span className="text-purple-950 font-semibold">
+                        Código temporal 6 dígitos (10 min):
+                      </span>
+                      <strong className="font-mono text-base font-black text-yape tracking-widest">
+                        {clientPairCode.slice(0, 3)} {clientPairCode.slice(3)}
+                      </strong>
+                    </div>
+                  )}
                 </div>
 
                 {/* Edición directa de cada Usuario */}

@@ -12,6 +12,8 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
   const [copied, setCopied] = useState('');
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(false);
+  const [pairingData, setPairingData] = useState(null);
+  const [generatingPair, setGeneratingPair] = useState(false);
 
   useEffect(() => {
     loadMyBusiness();
@@ -140,7 +142,32 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
     }
   };
 
+  const handleGeneratePairCode = async () => {
+    setGeneratingPair(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/pair`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      });
+      const data = await res.json();
+      if (res.ok && data.codigo) {
+        setPairingData(data);
+      } else {
+        alert(data.error || 'No se pudo generar el código de vinculación');
+      }
+    } catch {
+      alert('Error de red al generar código');
+    } finally {
+      setGeneratingPair(false);
+    }
+  };
+
   const activeApiKey = negocio?.api_key || user?.api_key || '';
+  const sensorStatus = negocio?.sensor_status;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-3">
@@ -171,11 +198,30 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
             </div>
           )}
 
-          <div className="p-3.5 sm:p-4 bg-purple-50/60 border border-purple-200 rounded-xl">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-              <span className="text-xs font-extrabold text-yape uppercase flex items-center gap-1.5">
-                <Smartphone className="w-4 h-4" /> 1. Vincular Celular Android (App Sensor)
-              </span>
+          <div className="p-3.5 sm:p-4 bg-purple-50/60 border border-purple-200 rounded-xl space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-extrabold text-yape uppercase flex items-center gap-1.5">
+                  <Smartphone className="w-4 h-4" /> 1. Vincular Celular Android (Sensor v2.0)
+                </span>
+                {sensorStatus?.online ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    En Línea {sensorStatus.device_name ? `(${sensorStatus.device_name})` : ''}
+                    {sensorStatus.battery !== null && sensorStatus.battery !== undefined
+                      ? ` • ${sensorStatus.battery}%`
+                      : ''}
+                  </span>
+                ) : sensorStatus?.sensor_last_seen ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                    Sin señal reciente {sensorStatus.device_name ? `(${sensorStatus.device_name})` : ''}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-600">
+                    Pendiente de vincular
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={handleTestMySensor}
@@ -183,6 +229,41 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
               >
                 <Play className="w-3 h-3 fill-white" /> Simular Pago S/ 15.50
               </button>
+            </div>
+
+            {/* Tarjeta de Vinculación Rápida de 6 Dígitos */}
+            <div className="bg-white p-3 rounded-xl border border-purple-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-extrabold text-gray-900 block">
+                  ⚡ Vinculación Instantánea con Código de 6 Dígitos (Recomendado)
+                </span>
+                <span className="text-[11px] text-gray-500 block">
+                  Abre la App Yape Sensor v2.0 en tu celular, escribe este código y quedará enlazado con firma HMAC sin copiar llaves largas.
+                </span>
+              </div>
+              {pairingData?.codigo ? (
+                <div className="flex items-center gap-2 bg-purple-50 border border-purple-300 px-3.5 py-2 rounded-xl flex-shrink-0">
+                  <span className="font-mono text-xl font-black tracking-widest text-yape">
+                    {pairingData.codigo.slice(0, 3)} {pairingData.codigo.slice(3)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyVal(pairingData.codigo, 'paircode')}
+                    className="text-xs font-bold text-yape bg-white px-2 py-1 rounded border border-purple-200"
+                  >
+                    {copied === 'paircode' ? '¡Copiado!' : 'Copiar'}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={generatingPair}
+                  onClick={handleGeneratePairCode}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs px-3.5 py-2.5 rounded-xl flex-shrink-0 shadow-sm transition"
+                >
+                  {generatingPair ? 'Generando...' : 'Generar Código 6 Dígitos'}
+                </button>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
