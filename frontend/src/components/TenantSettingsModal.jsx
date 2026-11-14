@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import {
-  X, Copy, Check, Users, Plus, Trash2, Play, ExternalLink, Smartphone
+  X, Copy, Check, Users, Plus, Trash2, Play, ExternalLink, Smartphone, Save, Eye, EyeOff, KeyRound
 } from 'lucide-react';
 
 export default function TenantSettingsModal({ token, apiUrl, user, onClose, onProfileUpdated }) {
   const [negocio, setNegocio] = useState(null);
   const [usuarios, setUsuarios] = useState([]);
+  const [userDrafts, setUserDrafts] = useState({});
+  const [visiblePasswords, setVisiblePasswords] = useState({});
+  const [savingUserId, setSavingUserId] = useState(null);
   const [webhookUrl, setWebhookUrl] = useState(user?.webhook_url || '');
   const [whatsappAlerta, setWhatsappAlerta] = useState(user?.whatsapp_alerta || '');
   const [cajeroForm, setCajeroForm] = useState({ username: '', password: '', nombre_mostrar: '' });
@@ -27,8 +30,22 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
       });
       const data = await res.json();
       if (res.ok && data.negocio) {
+        const list = (data.usuarios || []).sort((a, b) => {
+          if (a.rol === 'DUENO' && b.rol !== 'DUENO') return -1;
+          if (a.rol !== 'DUENO' && b.rol === 'DUENO') return 1;
+          return 0;
+        });
+        const drafts = {};
+        list.forEach((u) => {
+          drafts[u.id] = {
+            username: u.username || '',
+            password: u.password || '',
+            activo: u.activo !== false
+          };
+        });
         setNegocio(data.negocio);
-        setUsuarios(data.usuarios || []);
+        setUsuarios(list);
+        setUserDrafts(drafts);
         setWebhookUrl(data.negocio.webhook_url || '');
         setWhatsappAlerta(data.negocio.whatsapp_alerta || '');
       }
@@ -115,7 +132,64 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
       headers: { Authorization: `Bearer ${token}` }
     });
     if (res.ok) {
+      setMsg('Cajero eliminado.');
+      setTimeout(() => setMsg(''), 3000);
       loadMyBusiness();
+    }
+  };
+
+  const handleSaveUserCredentials = async (u) => {
+    const draft = userDrafts[u.id];
+    if (!draft) return;
+    const cleanUsername = String(draft.username || '').trim();
+    const cleanPassword = String(draft.password || '');
+
+    if (!cleanUsername) {
+      alert('El nombre de usuario no puede quedar vacío.');
+      return;
+    }
+    if (cleanPassword.length < 4) {
+      alert('La contraseña debe tener al menos 4 caracteres.');
+      return;
+    }
+
+    setSavingUserId(u.id);
+    try {
+      const res = await fetch(`${apiUrl}/api/admin`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'update_usuario',
+          usuario_id: u.id,
+          username: cleanUsername,
+          password: cleanPassword,
+          activo: u.rol === 'DUENO' ? true : draft.activo
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'No se pudo actualizar el usuario');
+        return;
+      }
+
+      if (String(u.id) === String(user?.id) && onProfileUpdated) {
+        onProfileUpdated({ username: data.usuario?.username || cleanUsername });
+      }
+
+      setMsg(
+        u.rol === 'DUENO'
+          ? '¡Tu usuario y contraseña de DUEÑO se actualizaron correctamente!'
+          : `¡Credenciales del cajero "${cleanUsername}" actualizadas!`
+      );
+      setTimeout(() => setMsg(''), 3500);
+      await loadMyBusiness();
+    } catch {
+      alert('Error de conexión al guardar credenciales');
+    } finally {
+      setSavingUserId(null);
     }
   };
 
@@ -297,71 +371,186 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
             </div>
           </div>
 
-          <div className="p-3.5 sm:p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl">
-            <div className="text-xs font-extrabold text-emerald-900 uppercase flex items-center gap-1.5 mb-2">
-              <Users className="w-4 h-4" /> 2. Mis Cajeros / Mostrador (No borran historial)
+          <div className="p-3.5 sm:p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-3">
+            <div>
+              <div className="text-xs font-extrabold text-emerald-900 uppercase flex items-center gap-1.5">
+                <KeyRound className="w-4 h-4" /> 2. Mi Clave (DUEÑO) y Claves de Cajeros
+              </div>
+              <p className="text-[11px] text-gray-600 mt-0.5">
+                Puedes cambiar tu propia contraseña o usuario y también modificar o crear las cuentas de tus cajeros.
+              </p>
             </div>
 
-            <div className="space-y-2 mb-3">
+            <div className="space-y-2.5">
               {loading ? (
                 <p className="text-xs text-gray-400">Cargando usuarios...</p>
               ) : (
-                usuarios.map((u) => (
-                  <div
-                    key={u.id}
-                    className="flex items-center justify-between bg-white px-3 py-2 rounded-lg border border-gray-200 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <span
-                        className={`px-1.5 py-0.5 rounded font-bold text-[10px] mr-2 ${
-                          u.rol === 'DUENO'
-                            ? 'bg-purple-100 text-purple-800'
-                            : 'bg-emerald-100 text-emerald-800'
-                        }`}
-                      >
-                        {u.rol === 'DUENO' ? 'DUEÑO' : u.rol}
-                      </span>
-                      <strong className="text-gray-800">{u.username}</strong>
-                      <span className="text-gray-400 ml-2">Clave: {u.password}</span>
+                usuarios.map((u) => {
+                  const isOwnerRow = u.rol === 'DUENO';
+                  const draft = userDrafts[u.id] || {
+                    username: u.username || '',
+                    password: u.password || '',
+                    activo: u.activo !== false
+                  };
+                  const showPass = Boolean(visiblePasswords[u.id]);
+                  const hasChanges =
+                    draft.username !== (u.username || '') ||
+                    draft.password !== (u.password || '') ||
+                    (!isOwnerRow && draft.activo !== (u.activo !== false));
+
+                  return (
+                    <div
+                      key={u.id}
+                      className={`p-3 rounded-xl border text-xs space-y-2 ${
+                        isOwnerRow
+                          ? 'bg-purple-50/70 border-purple-200'
+                          : 'bg-white border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-md font-extrabold text-[10px] ${
+                              isOwnerRow
+                                ? 'bg-yape text-white'
+                                : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {isOwnerRow ? '👑 MI CUENTA (DUEÑO)' : '💼 CAJERO'}
+                          </span>
+                          {!isOwnerRow && (
+                            <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-gray-600 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={draft.activo}
+                                onChange={(e) =>
+                                  setUserDrafts({
+                                    ...userDrafts,
+                                    [u.id]: { ...draft, activo: e.target.checked }
+                                  })
+                                }
+                                className="rounded text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span>{draft.activo ? 'Activo' : 'Pausado'}</span>
+                            </label>
+                          )}
+                        </div>
+
+                        {!isOwnerRow && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCajero(u.id)}
+                            className="text-gray-400 hover:text-red-600 p-1 rounded hover:bg-red-50 transition"
+                            title="Eliminar este cajero"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                        <div className="sm:col-span-4">
+                          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-0.5">
+                            Usuario
+                          </label>
+                          <input
+                            type="text"
+                            value={draft.username}
+                            onChange={(e) =>
+                              setUserDrafts({
+                                ...userDrafts,
+                                [u.id]: { ...draft, username: e.target.value }
+                              })
+                            }
+                            className="w-full px-2.5 py-2 bg-white border border-gray-300 rounded-lg font-bold text-gray-800 focus:ring-2 focus:ring-yape outline-none"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-5">
+                          <label className="block text-[10px] font-bold text-gray-500 uppercase mb-0.5">
+                            Contraseña
+                          </label>
+                          <div className="relative flex items-center">
+                            <input
+                              type={showPass ? 'text' : 'password'}
+                              value={draft.password}
+                              onChange={(e) =>
+                                setUserDrafts({
+                                  ...userDrafts,
+                                  [u.id]: { ...draft, password: e.target.value }
+                                })
+                              }
+                              placeholder="Mínimo 4 caracteres"
+                              className="w-full pl-2.5 pr-8 py-2 bg-white border border-gray-300 rounded-lg font-mono text-gray-800 focus:ring-2 focus:ring-yape outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVisiblePasswords({
+                                  ...visiblePasswords,
+                                  [u.id]: !showPass
+                                })
+                              }
+                              className="absolute right-2 text-gray-400 hover:text-gray-700"
+                              title={showPass ? 'Ocultar clave' : 'Ver clave'}
+                            >
+                              {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="sm:col-span-3">
+                          <button
+                            type="button"
+                            disabled={savingUserId === u.id}
+                            onClick={() => handleSaveUserCredentials(u)}
+                            className={`w-full py-2 px-3 rounded-lg font-bold flex items-center justify-center gap-1.5 transition shadow-sm ${
+                              hasChanges
+                                ? 'bg-yape hover:bg-yape-dark text-white'
+                                : 'bg-gray-800 hover:bg-black text-white'
+                            }`}
+                          >
+                            <Save className="w-3.5 h-3.5" />
+                            <span>{savingUserId === u.id ? 'Guardando...' : 'Guardar Clave'}</span>
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    {u.rol !== 'DUENO' && (
-                      <button
-                        onClick={() => handleDeleteCajero(u.id)}
-                        className="text-gray-400 hover:text-red-600 p-1"
-                        title="Eliminar cajero"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
-            <form onSubmit={handleCreateCajero} className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <input
-                type="text"
-                required
-                placeholder="Nuevo usuario cajero"
-                className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
-                value={cajeroForm.username}
-                onChange={(e) => setCajeroForm({ ...cajeroForm, username: e.target.value })}
-              />
-              <input
-                type="text"
-                required
-                placeholder="Contraseña"
-                className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
-                value={cajeroForm.password}
-                onChange={(e) => setCajeroForm({ ...cajeroForm, password: e.target.value })}
-              />
-              <button
-                type="submit"
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1"
-              >
-                <Plus className="w-3.5 h-3.5" /> Crear Cajero
-              </button>
-            </form>
+            <div className="pt-2 border-t border-emerald-200/70">
+              <span className="block text-[11px] font-bold text-emerald-900 mb-1.5 flex items-center gap-1">
+                <Users className="w-3.5 h-3.5" /> Agregar Nuevo Cajero / Mostrador (No puede borrar pagos)
+              </span>
+              <form onSubmit={handleCreateCajero} className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <input
+                  type="text"
+                  required
+                  placeholder="Nuevo usuario cajero"
+                  className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
+                  value={cajeroForm.username}
+                  onChange={(e) => setCajeroForm({ ...cajeroForm, username: e.target.value })}
+                />
+                <input
+                  type="text"
+                  required
+                  minLength={4}
+                  placeholder="Contraseña (mín. 4)"
+                  className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
+                  value={cajeroForm.password}
+                  onChange={(e) => setCajeroForm({ ...cajeroForm, password: e.target.value })}
+                />
+                <button
+                  type="submit"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Crear Cajero
+                </button>
+              </form>
+            </div>
           </div>
 
           <form onSubmit={handleSaveIntegrations} className="p-3.5 sm:p-4 bg-gray-50 border border-gray-200 rounded-xl space-y-3">

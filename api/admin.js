@@ -464,12 +464,20 @@ export default async function handler(req, res) {
           updates.username = cleanUser;
         }
         if (password !== undefined && password !== '') {
+          if (String(password).length < 4) {
+            return res.status(400).json({ error: 'La contraseña debe tener al menos 4 caracteres.' });
+          }
           updates.password = encryptSecret(password);
         }
         if (isSuperAdmin && rol && ['DUENO', 'CAJERO'].includes(rol.toUpperCase())) {
           updates.rol = rol.toUpperCase();
         }
-        if (activo !== undefined) updates.activo = Boolean(activo);
+        if (activo !== undefined) {
+          if (!isSuperAdmin && targetUser.rol === 'DUENO' && !activo) {
+            return res.status(400).json({ error: 'No puedes desactivar la cuenta principal del dueño.' });
+          }
+          updates.activo = Boolean(activo);
+        }
         if (nombre_mostrar) updates.nombre_mostrar = sanitizeText(nombre_mostrar, 80);
 
         const { data: updated, error } = await supabase

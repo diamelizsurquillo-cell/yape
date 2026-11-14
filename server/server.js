@@ -656,6 +656,13 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
                     finalUsername = cleanUser;
                 }
 
+                if (password !== undefined && password !== '' && String(password).length < 4) {
+                    return res.status(400).json({ error: 'La contraseña debe tener al menos 4 caracteres.' });
+                }
+                if (!isSuperAdmin && targetUser.rol === 'DUENO' && activo === false) {
+                    return res.status(400).json({ error: 'No puedes desactivar la cuenta principal del dueño.' });
+                }
+
                 await db.run(
                     `UPDATE usuarios_negocio SET username = ?, password = ?, rol = ?, activo = ?, nombre_mostrar = ? WHERE id = ?`,
                     [
