@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  X, Key, Copy, Check, Users, Plus, Trash2, Play, ExternalLink, Smartphone
+  X, Copy, Check, Users, Plus, Trash2, Play, ExternalLink, Smartphone
 } from 'lucide-react';
 
 export default function TenantSettingsModal({ token, apiUrl, user, onClose, onProfileUpdated }) {
@@ -71,7 +71,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
       } else {
         alert(data.error || 'No se pudo guardar');
       }
-    } catch (err) {
+    } catch {
       alert('Error de conexión');
     }
   };
@@ -101,7 +101,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
       setCajeroForm({ username: '', password: '', nombre_mostrar: '' });
       setMsg('Cajero creado con éxito.');
       loadMyBusiness();
-    } catch (err) {
+    } catch {
       alert('Error al crear cajero');
     }
   };
@@ -143,45 +143,49 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
   const activeApiKey = negocio?.api_key || user?.api_key || '';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 border border-gray-100 relative my-8">
-        <button
-          onClick={onClose}
-          className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        <h3 className="text-xl font-extrabold text-gray-900">
-          Configuración de Mi Negocio: {negocio?.nombre_comercial || user?.nombre_comercial}
-        </h3>
-        <p className="text-xs text-gray-500 mb-4">
-          Vincula tu celular Android, administra a tus cajeros y conecta tus integraciones.
-        </p>
-
-        {msg && (
-          <div className="mb-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold">
-            {msg}
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-3">
+      <div className="bg-white w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl border border-gray-100 max-h-[93dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+        {/* Cabecera fija */}
+        <div className="px-4 sm:px-6 py-3.5 border-b border-gray-100 flex items-center justify-between flex-shrink-0 bg-white">
+          <div className="min-w-0">
+            <h3 className="text-base sm:text-lg font-extrabold text-gray-900 truncate">
+              Mi Negocio: {negocio?.nombre_comercial || user?.nombre_comercial}
+            </h3>
+            <p className="text-[11px] sm:text-xs text-gray-500">
+              Vincula tu celular Android, administra a tus cajeros y conecta tus integraciones.
+            </p>
           </div>
-        )}
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100 flex-shrink-0"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
-        <div className="space-y-5 text-sm max-h-[75vh] overflow-y-auto pr-1">
-          {/* 1. Conexión App Android Sensor */}
-          <div className="p-4 bg-purple-50/60 border border-purple-200 rounded-xl">
-            <div className="flex items-center justify-between mb-2">
+        {/* Cuerpo con scroll interno */}
+        <div className="p-4 sm:p-6 overflow-y-auto modal-scroll flex-1 space-y-4 text-sm pb-safe">
+          {msg && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold">
+              {msg}
+            </div>
+          )}
+
+          <div className="p-3.5 sm:p-4 bg-purple-50/60 border border-purple-200 rounded-xl">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
               <span className="text-xs font-extrabold text-yape uppercase flex items-center gap-1.5">
                 <Smartphone className="w-4 h-4" /> 1. Vincular Celular Android (App Sensor)
               </span>
               <button
                 type="button"
                 onClick={handleTestMySensor}
-                className="bg-yape hover:bg-yape-dark text-white text-xs font-bold px-3 py-1 rounded-lg flex items-center gap-1"
+                className="bg-yape hover:bg-yape-dark text-white text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1"
               >
                 <Play className="w-3 h-3 fill-white" /> Simular Pago S/ 15.50
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
               <div className="bg-white p-2.5 rounded-lg border border-gray-200">
                 <div className="flex justify-between text-gray-500 font-semibold mb-1">
                   <span>URL del Backend:</span>
@@ -212,10 +216,9 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
             </div>
           </div>
 
-          {/* 2. Cajeros / Modo Satélite */}
-          <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl">
+          <div className="p-3.5 sm:p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl">
             <div className="text-xs font-extrabold text-emerald-900 uppercase flex items-center gap-1.5 mb-2">
-              <Users className="w-4 h-4" /> 2. Mis Cajeros / Mostrador (No pueden borrar historial)
+              <Users className="w-4 h-4" /> 2. Mis Cajeros / Mostrador (No borran historial)
             </div>
 
             <div className="space-y-2 mb-3">
@@ -227,7 +230,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
                     key={u.id}
                     className="flex items-center justify-between bg-white px-3 py-2 rounded-lg border border-gray-200 text-xs"
                   >
-                    <div>
+                    <div className="min-w-0">
                       <span
                         className={`px-1.5 py-0.5 rounded font-bold text-[10px] mr-2 ${
                           u.rol === 'DUENO'
@@ -259,7 +262,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
                 type="text"
                 required
                 placeholder="Nuevo usuario cajero"
-                className="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs"
+                className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
                 value={cajeroForm.username}
                 onChange={(e) => setCajeroForm({ ...cajeroForm, username: e.target.value })}
               />
@@ -267,21 +270,20 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
                 type="text"
                 required
                 placeholder="Contraseña"
-                className="px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs"
+                className="px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
                 value={cajeroForm.password}
                 onChange={(e) => setCajeroForm({ ...cajeroForm, password: e.target.value })}
               />
               <button
                 type="submit"
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-1.5 px-3 rounded-lg flex items-center justify-center gap-1"
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1"
               >
                 <Plus className="w-3.5 h-3.5" /> Crear Cajero
               </button>
             </form>
           </div>
 
-          {/* 3. Webhook E-commerce / Facturador + WhatsApp Delivery */}
-          <form onSubmit={handleSaveIntegrations} className="p-4 bg-gray-50 border border-gray-200 rounded-xl space-y-3">
+          <form onSubmit={handleSaveIntegrations} className="p-3.5 sm:p-4 bg-gray-50 border border-gray-200 rounded-xl space-y-3">
             <div className="text-xs font-extrabold text-gray-800 uppercase flex items-center gap-1.5">
               <ExternalLink className="w-4 h-4 text-blue-600" /> 3. Integración WooCommerce / Facturador & WhatsApp Delivery
             </div>
@@ -301,7 +303,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
 
             <div>
               <label className="block text-xs font-semibold text-gray-600 mb-1">
-                Número WhatsApp de Repartidor / Cocina (con código país, ej: 51999888777)
+                Número WhatsApp de Repartidor / Cocina (ej: 51999888777)
               </label>
               <input
                 type="text"
@@ -310,15 +312,12 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
                 value={whatsappAlerta}
                 onChange={(e) => setWhatsappAlerta(e.target.value)}
               />
-              <p className="text-[11px] text-gray-400 mt-1">
-                Habilita el botón rápido "Enviar a WhatsApp" en cada pago recibido para avisar al repartidor o encargado.
-              </p>
             </div>
 
             <div className="flex justify-end">
               <button
                 type="submit"
-                className="bg-gray-900 hover:bg-black text-white font-bold text-xs px-4 py-2 rounded-lg transition"
+                className="w-full sm:w-auto bg-gray-900 hover:bg-black text-white font-bold text-xs px-4 py-2.5 rounded-lg transition"
               >
                 Guardar Integraciones
               </button>

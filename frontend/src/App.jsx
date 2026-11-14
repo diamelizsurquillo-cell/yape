@@ -5,12 +5,13 @@ import {
   Coins, Filter, RefreshCw,
   ShieldAlert, Check, Trash2,
   Volume2, VolumeX, Settings, Play, X,
-  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink
+  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink, Smartphone
 } from 'lucide-react';
 import { speakPayment, playChime } from './utils/soundAlert';
 import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
 import { requestNotificationPermission, showDesktopNotification } from './utils/desktopNotification';
-import { openYapeFloatingWidget, updateFloatingWidget } from './utils/pipWidget';
+import { openYapeFloatingWidget, updateFloatingWidget, isPipSupported } from './utils/pipWidget';
+import { useDeviceViewport } from './utils/useDeviceViewport';
 import SuperAdminPanel from './components/SuperAdminPanel';
 import TenantSettingsModal from './components/TenantSettingsModal';
 
@@ -19,7 +20,6 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 function loadInitialSession() {
   const savedToken = localStorage.getItem('yape_token') || '';
   const savedUserRaw = localStorage.getItem('yape_user');
-  // Limpiar sesiones antiguas pre-SaaS que no son JWT firmados
   if (!savedToken || !savedToken.includes('.')) {
     localStorage.removeItem('yape_token');
     localStorage.removeItem('yape_user');
@@ -34,6 +34,7 @@ function loadInitialSession() {
 }
 
 function App() {
+  const viewport = useDeviceViewport();
   const initialSession = loadInitialSession();
   const [token, setToken] = useState(initialSession.token);
   const [currentUser, setCurrentUser] = useState(initialSession.user);
@@ -41,10 +42,13 @@ function App() {
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  // Navegación SuperAdmin ('pagos' | 'clientes')
-  const [activeTab, setActiveTab] = useState('pagos');
+  // Navegación ('pagos' | 'clientes')
+  const [activeTab, setActiveTab] = useState(
+    initialSession.user?.rol === 'SUPERADMIN' ? 'clientes' : 'pagos'
+  );
   const [superAdminTenantFilter, setSuperAdminTenantFilter] = useState(null);
   const [showTenantModal, setShowTenantModal] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   // Dashboard State
   const [payments, setPayments] = useState([]);
@@ -57,7 +61,7 @@ function App() {
   const [endDate, setEndDate] = useState('');
   const [stats, setStats] = useState({ totalToday: 0, pendingCount: 0, validatedCount: 0 });
 
-  // Sound / Voice announcement state
+  // Sound / Voice state
   const [soundEnabled, setSoundEnabled] = useState(localStorage.getItem('yape_sound_enabled') !== 'false');
   const [includeSender, setIncludeSender] = useState(localStorage.getItem('yape_sound_sender') === 'true');
   const [soundVolume, setSoundVolume] = useState(parseFloat(localStorage.getItem('yape_sound_volume') || '1.0'));
@@ -125,7 +129,6 @@ function App() {
       return [nuevoPago, ...prev];
     });
 
-    // 1. Anunciar por voz en el parlante
     const { soundEnabled: isSoundOn, includeSender: withSender, soundVolume: vol } = soundSettingsRef.current;
     if (isSoundOn) {
       speakPayment({
@@ -138,7 +141,6 @@ function App() {
       });
     }
 
-    // 2. Notificación nativa de escritorio
     showDesktopNotification({
       monto: nuevoPago.monto,
       remitente: nuevoPago.remitente,
@@ -146,10 +148,8 @@ function App() {
       banco: nuevoPago.banco || 'YAPE'
     });
 
-    // 3. Actualizar Mini-Widget Flotante PiP
     updateFloatingWidget(nuevoPago);
 
-    // 4. Popup Toast inferior
     setActiveToast(nuevoPago);
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     toastTimeoutRef.current = setTimeout(() => {
@@ -261,7 +261,7 @@ function App() {
       } else {
         setLoginError(data.error || 'Credenciales inválidas');
       }
-    } catch (err) {
+    } catch {
       setLoginError('Error de conexión con el servidor backend');
     }
   };
@@ -390,6 +390,7 @@ function App() {
   const handleApplyFilters = (e) => {
     e.preventDefault();
     fetchPayments();
+    if (viewport.isMobile) setMobileFiltersOpen(false);
   };
 
   const handleClearFilters = () => {
@@ -431,7 +432,7 @@ function App() {
       } else {
         alert(data.error || 'No se pudo limpiar el historial.');
       }
-    } catch (err) {
+    } catch {
       alert('Error de red al limpiar el historial.');
     } finally {
       setLoading(false);
@@ -499,24 +500,29 @@ function App() {
   const remainingDays = getSubscriptionRemainingDays();
 
   // =========================================================================
-  // PANTALLA DE LOGIN MULTI-EMPRESA
+  // PANTALLA DE LOGIN ADAPTABLE (PC, TABLET Y CELULAR)
   // =========================================================================
   if (!token) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-tr from-yape-dark via-yape to-yape-light p-4">
-        <div className="bg-white/95 backdrop-blur-md p-8 rounded-2xl shadow-2xl w-full max-w-md border border-white/20">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-yape/10 text-yape mb-3 shadow-inner">
-              <Coins className="w-8 h-8" />
+      <div className="min-h-[100dvh] flex items-center justify-center bg-gradient-to-tr from-yape-dark via-yape to-yape-light p-4">
+        <div className="bg-white/95 backdrop-blur-md p-6 sm:p-8 rounded-2xl shadow-2xl w-full max-w-md border border-white/20">
+          <div className="text-center mb-6 sm:mb-8">
+            <div className="inline-flex items-center justify-center w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-yape/10 text-yape mb-3 shadow-inner">
+              <Coins className="w-7 h-7 sm:w-8 sm:h-8" />
             </div>
-            <h1 className="text-2xl font-extrabold text-gray-900">Verificador Yape / Plin / BBVA</h1>
-            <p className="text-sm text-gray-500 mt-1">
+            <h1 className="text-xl sm:text-2xl font-extrabold text-gray-900">
+              Verificador Yape / Plin / BBVA
+            </h1>
+            <p className="text-xs sm:text-sm text-gray-500 mt-1">
               Plataforma Antifraude en Tiempo Real para Negocios
             </p>
+            <span className="inline-block mt-2 text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-purple-50 text-yape border border-purple-200">
+              Vista optimizada: {viewport.deviceLabel}
+            </span>
           </div>
 
           {loginError && (
-            <div className="bg-red-50 text-red-700 p-3.5 rounded-xl text-sm mb-4 flex items-start gap-2 border border-red-200 font-medium">
+            <div className="bg-red-50 text-red-700 p-3.5 rounded-xl text-xs sm:text-sm mb-4 flex items-start gap-2 border border-red-200 font-medium">
               <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5 text-red-600" />
               <span>{loginError}</span>
             </div>
@@ -530,7 +536,8 @@ function App() {
               <input
                 type="text"
                 required
-                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-yape focus:border-transparent outline-none transition"
+                autoCapitalize="none"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-base sm:text-sm focus:ring-2 focus:ring-yape focus:border-transparent outline-none transition"
                 placeholder="Ej: polleria_admin o polleria_caja"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -543,7 +550,7 @@ function App() {
               <input
                 type="password"
                 required
-                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-yape focus:border-transparent outline-none transition"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-base sm:text-sm focus:ring-2 focus:ring-yape focus:border-transparent outline-none transition"
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -551,7 +558,7 @@ function App() {
             </div>
             <button
               type="submit"
-              className="w-full bg-yape hover:bg-yape-dark text-white font-bold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transition duration-200 flex items-center justify-center"
+              className="w-full bg-yape hover:bg-yape-dark active:scale-[0.99] text-white font-bold py-3 px-4 rounded-xl shadow-lg transition duration-200 flex items-center justify-center"
             >
               Ingresar al Panel
             </button>
@@ -585,7 +592,7 @@ function App() {
     const b = (bancoRaw || 'YAPE').toUpperCase();
     if (b === 'BBVA') {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-black tracking-wider bg-[#004481] text-white shadow-sm">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-black tracking-wider bg-[#004481] text-white shadow-sm">
           <span className="w-2 h-2 rounded-full bg-cyan-400"></span>
           BBVA
         </span>
@@ -593,14 +600,14 @@ function App() {
     }
     if (b === 'PLIN') {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-black tracking-wider bg-teal-600 text-white shadow-sm">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-black tracking-wider bg-teal-600 text-white shadow-sm">
           <span className="w-2 h-2 rounded-full bg-emerald-300"></span>
           PLIN
         </span>
       );
     }
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-black tracking-wider bg-[#740099] text-white shadow-sm">
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-black tracking-wider bg-[#740099] text-white shadow-sm">
         <span className="w-2 h-2 rounded-full bg-green-400"></span>
         YAPE
       </span>
@@ -608,20 +615,20 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 pb-12">
-      {/* Navbar Superior */}
-      <nav className="bg-yape text-white shadow-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16 gap-2">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Coins className="w-6 h-6 text-white flex-shrink-0" />
+    <div className={`min-h-[100dvh] bg-gray-100 ${viewport.isMobile ? 'pb-24' : 'pb-12'}`}>
+      {/* NAVBAR SUPERIOR INTELIGENTE */}
+      <nav className="bg-yape text-white shadow-md sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-14 sm:h-16 gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Coins className="w-5 h-5 sm:w-6 sm:h-6 text-white flex-shrink-0" />
               <div className="truncate">
-                <span className="font-extrabold text-base sm:text-lg tracking-wide truncate">
+                <span className="font-extrabold text-sm sm:text-lg tracking-wide truncate block">
                   {currentUser?.nombre_comercial || 'YAPE MONITOR'}
                 </span>
               </div>
               <span
-                className={`hidden md:inline text-[10px] uppercase font-extrabold px-2.5 py-0.5 rounded-full border ${
+                className={`hidden sm:inline text-[10px] uppercase font-extrabold px-2 py-0.5 rounded-full border flex-shrink-0 ${
                   isSuperAdmin
                     ? 'bg-amber-400 text-gray-900 border-amber-300'
                     : isCajero
@@ -631,11 +638,19 @@ function App() {
               >
                 {currentUser?.rol || 'ADMIN'}
               </span>
+              {/* Indicador automático de tipo de monitor detectado */}
+              <span
+                className="hidden xl:inline-flex items-center gap-1 text-[10px] font-semibold bg-white/15 text-white/95 px-2 py-0.5 rounded-full border border-white/20 flex-shrink-0"
+                title={`Resolución detectada: ${viewport.resolutionText}`}
+              >
+                <Smartphone className="w-3 h-3" />
+                {viewport.deviceLabel}
+              </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              {/* Pestañas SuperAdmin */}
-              {isSuperAdmin && (
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+              {/* Pestañas SuperAdmin en Tablet / PC */}
+              {isSuperAdmin && !viewport.isMobile && (
                 <div className="flex items-center bg-yape-dark/80 p-1 rounded-xl border border-white/15 mr-1">
                   <button
                     onClick={() => setActiveTab('clientes')}
@@ -646,7 +661,7 @@ function App() {
                     }`}
                   >
                     <Building2 className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Clientes SaaS</span>
+                    <span>Clientes SaaS</span>
                   </button>
                   <button
                     onClick={() => setActiveTab('pagos')}
@@ -657,13 +672,13 @@ function App() {
                     }`}
                   >
                     <Coins className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Pagos en Vivo</span>
+                    <span>Pagos en Vivo</span>
                   </button>
                 </div>
               )}
 
-              {/* Botón Mi Negocio / Cajeros para el Dueño */}
-              {isDueno && (
+              {/* Botón Mi Negocio en Tablet / PC */}
+              {isDueno && !viewport.isMobile && (
                 <button
                   onClick={() => setShowTenantModal(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-white text-yape hover:bg-purple-50 border-white"
@@ -681,7 +696,7 @@ function App() {
                   setSoundEnabled(newState);
                   if (newState) playChime(soundVolume);
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
+                className={`flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
                   soundEnabled
                     ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400'
                     : 'bg-red-500/90 hover:bg-red-600 text-white border-red-400'
@@ -692,52 +707,56 @@ function App() {
                 <span className="hidden lg:inline">{soundEnabled ? 'Voz: ON' : 'Voz: OFF'}</span>
               </button>
 
-              {/* Notificaciones Segundo Plano */}
-              <button
-                onClick={async () => {
-                  const perm = await requestNotificationPermission();
-                  setDesktopNotifications(perm === 'granted');
-                  if (perm === 'granted') {
-                    showDesktopNotification({
-                      monto: 50,
-                      remitente: 'Cliente de Prueba',
-                      codigo_seguridad: '999'
-                    });
-                  }
-                }}
-                className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
-                  desktopNotifications
-                    ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400'
-                    : 'bg-amber-500/90 hover:bg-amber-600 text-white border-amber-300'
-                }`}
-                title="Activar alertas emergentes de escritorio"
-              >
-                {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
-              </button>
+              {/* Alertas Escritorio (Tablet / PC) */}
+              {!viewport.isMobile && (
+                <button
+                  onClick={async () => {
+                    const perm = await requestNotificationPermission();
+                    setDesktopNotifications(perm === 'granted');
+                    if (perm === 'granted') {
+                      showDesktopNotification({
+                        monto: 50,
+                        remitente: 'Cliente de Prueba',
+                        codigo_seguridad: '999'
+                      });
+                    }
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
+                    desktopNotifications
+                      ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400'
+                      : 'bg-amber-500/90 hover:bg-amber-600 text-white border-amber-300'
+                  }`}
+                  title="Activar alertas emergentes de escritorio"
+                >
+                  {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                </button>
+              )}
 
-              {/* Mini-Ventana Flotante PiP */}
-              <button
-                onClick={async () => {
-                  await openYapeFloatingWidget({
-                    onValidatePayment: (id) => validatePayment(id)
-                  });
-                }}
-                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-blue-600 hover:bg-blue-700 text-white border-blue-400"
-                title="Abrir Mini-Ventana Flotante SIEMPRE VISIBLE"
-              >
-                <AppWindow className="w-4 h-4" />
-                <span className="hidden xl:inline">Flotante</span>
-              </button>
+              {/* Mini-Ventana Flotante PiP (Solo en PC donde es soportado) */}
+              {viewport.isPC && isPipSupported() && (
+                <button
+                  onClick={async () => {
+                    await openYapeFloatingWidget({
+                      onValidatePayment: (id) => validatePayment(id)
+                    });
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-blue-600 hover:bg-blue-700 text-white border-blue-400"
+                  title="Abrir Mini-Ventana Flotante SIEMPRE VISIBLE en PC"
+                >
+                  <AppWindow className="w-4 h-4" />
+                  <span className="hidden xl:inline">Flotante</span>
+                </button>
+              )}
 
               <button
                 onClick={() => setShowSoundModal(true)}
                 className="p-2 rounded-full hover:bg-white/10 transition text-white"
                 title="Configuración de Voz"
               >
-                <Settings className="w-5 h-5" />
+                <Settings className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
 
-              {activeTab === 'pagos' && (
+              {activeTab === 'pagos' && !viewport.isMobile && (
                 <>
                   <button
                     onClick={fetchPayments}
@@ -762,7 +781,7 @@ function App() {
 
               <button
                 onClick={() => handleLogout()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yape-dark hover:bg-red-700 transition text-xs sm:text-sm font-semibold text-white"
+                className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-lg bg-yape-dark hover:bg-red-700 transition text-xs font-semibold text-white"
               >
                 <LogOut className="w-4 h-4" />
                 <span className="hidden sm:inline">Salir</span>
@@ -772,15 +791,15 @@ function App() {
         </div>
       </nav>
 
-      {/* Alerta de vencimiento próximo para el negocio cliente */}
+      {/* Alerta de vencimiento próximo */}
       {!isSuperAdmin && remainingDays !== null && remainingDays <= 5 && (
         <div className="bg-amber-500 text-white text-xs sm:text-sm font-bold py-2 px-4 text-center shadow">
-          ⚠️ Tu suscripción ({currentUser?.plan}) vence en {Math.max(0, remainingDays)} día(s). Contacta a soporte para renovar sin interrupciones.
+          ⚠️ Tu suscripción ({currentUser?.plan}) vence en {Math.max(0, remainingDays)} día(s). Contacta a soporte para renovar.
         </div>
       )}
 
-      {/* CONTENIDO PRINCIPAL */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+      {/* CUERPO PRINCIPAL ADAPTABLE */}
+      <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 sm:mt-6">
         {isSuperAdmin && activeTab === 'clientes' ? (
           <SuperAdminPanel
             token={token}
@@ -792,11 +811,10 @@ function App() {
           />
         ) : (
           <>
-            {/* Filtro de empresa activa cuando SuperAdmin inspecciona un cliente */}
             {isSuperAdmin && superAdminTenantFilter && (
-              <div className="mb-4 bg-purple-50 border border-purple-200 rounded-xl px-4 py-3 flex items-center justify-between">
-                <div className="text-sm text-purple-950 font-semibold">
-                  Inspeccionando pagos del cliente:{' '}
+              <div className="mb-4 bg-purple-50 border border-purple-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs sm:text-sm text-purple-950 font-semibold">
+                  Inspeccionando pagos de:{' '}
                   <strong className="font-extrabold">{superAdminTenantFilter.nombre_comercial}</strong>
                 </div>
                 <button
@@ -808,19 +826,16 @@ function App() {
               </div>
             )}
 
-            {/* Barra Especial MODO CAJERO ANTIFRAUDE (Estilo yaPagué) */}
+            {/* Barra Especial MODO CAJERO ANTIFRAUDE */}
             {isCajero && (
-              <div className="mb-6 bg-gradient-to-r from-emerald-600 to-teal-600 rounded-2xl p-5 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="mb-4 sm:mb-6 bg-gradient-to-r from-emerald-600 to-teal-600 rounded-2xl p-4 sm:p-5 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-3">
                 <div>
-                  <span className="text-[11px] uppercase font-extrabold bg-white/20 px-2.5 py-0.5 rounded-full">
+                  <span className="text-[10px] sm:text-[11px] uppercase font-extrabold bg-white/20 px-2.5 py-0.5 rounded-full">
                     Modo Cajero Antifraude • Turno del Día
                   </span>
-                  <h2 className="text-xl font-black mt-1">
-                    Verifica el Código de Seguridad de 3 Dígitos antes de entregar el pedido
+                  <h2 className="text-base sm:text-xl font-black mt-1">
+                    Verifica el Código de 3 Dígitos antes de entregar el pedido
                   </h2>
-                  <p className="text-xs text-emerald-100 mt-0.5">
-                    Las capturas falsas no aparecen en esta lista. Presiona "Validar" al atender al cliente.
-                  </p>
                 </div>
                 <div className="w-full md:w-72">
                   <input
@@ -834,189 +849,335 @@ function App() {
               </div>
             )}
 
-            {/* Tarjetas de Resumen del Día */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-gray-500 uppercase">Recaudado Hoy</p>
-                  <h3 className="text-3xl font-extrabold text-gray-800 mt-1">
+            {/* Tarjetas de Resumen del Día (Compactas en celular, amplias en PC) */}
+            <div className="grid grid-cols-3 gap-2.5 sm:gap-4 mb-4 sm:mb-6">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-5 flex items-center justify-between">
+                <div className="min-w-0">
+                  <p className="text-[10px] sm:text-xs font-bold text-gray-500 uppercase truncate">
+                    Hoy (S/)
+                  </p>
+                  <h3 className="text-base sm:text-3xl font-black text-gray-800 mt-0.5 truncate">
                     S/ {stats.totalToday.toFixed(2)}
                   </h3>
                 </div>
-                <div className="w-12 h-12 rounded-full bg-green-50 text-green-600 flex items-center justify-center">
+                <div className="hidden sm:flex w-11 h-11 rounded-full bg-green-50 text-green-600 items-center justify-center flex-shrink-0">
                   <Coins className="w-6 h-6" />
                 </div>
               </div>
 
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex items-center justify-between">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-semibold text-gray-500 uppercase">Validados Hoy</p>
-                  <h3 className="text-3xl font-extrabold text-green-600 mt-1">{stats.validatedCount}</h3>
+                  <p className="text-[10px] sm:text-xs font-bold text-gray-500 uppercase">Validados</p>
+                  <h3 className="text-lg sm:text-3xl font-black text-green-600 mt-0.5">
+                    {stats.validatedCount}
+                  </h3>
                 </div>
-                <div className="w-12 h-12 rounded-full bg-green-50 text-green-600 flex items-center justify-center">
+                <div className="hidden sm:flex w-11 h-11 rounded-full bg-green-50 text-green-600 items-center justify-center flex-shrink-0">
                   <CheckCircle className="w-6 h-6" />
                 </div>
               </div>
 
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex items-center justify-between">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 sm:p-5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-semibold text-gray-500 uppercase">Pendientes de Atender</p>
-                  <h3 className="text-3xl font-extrabold text-yellow-600 mt-1">{stats.pendingCount}</h3>
+                  <p className="text-[10px] sm:text-xs font-bold text-gray-500 uppercase">Pendientes</p>
+                  <h3 className="text-lg sm:text-3xl font-black text-yellow-600 mt-0.5">
+                    {stats.pendingCount}
+                  </h3>
                 </div>
-                <div className="w-12 h-12 rounded-full bg-yellow-50 text-yellow-600 flex items-center justify-center">
+                <div className="hidden sm:flex w-11 h-11 rounded-full bg-yellow-50 text-yellow-600 items-center justify-center flex-shrink-0">
                   <Clock className="w-6 h-6" />
                 </div>
               </div>
             </div>
 
-            {/* Panel de Filtros */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-              <div className="flex items-center justify-between border-b border-gray-100 pb-3 mb-4">
-                <div className="flex items-center gap-1.5 text-gray-700">
-                  <Filter className="w-5 h-5" />
-                  <h2 className="font-bold text-base">Filtros y Búsqueda</h2>
+            {/* Panel de Filtros (Colapsable en Celular para no ocupar toda la pantalla) */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3.5 sm:p-5 mb-4 sm:mb-6">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-1">
+                  {viewport.isMobile ? (
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        placeholder="Buscar cliente, cód 3 dígitos o monto..."
+                        className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-xl text-sm focus:ring-1 focus:ring-yape outline-none"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                      />
+                      <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 text-gray-700">
+                      <Filter className="w-5 h-5" />
+                      <h2 className="font-bold text-base">Filtros y Búsqueda</h2>
+                    </div>
+                  )}
                 </div>
-                {!isCajero && payments.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={exportToCsv}
-                    className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-lg transition"
-                  >
-                    ⬇ Exportar Excel (CSV)
-                  </button>
-                )}
+
+                <div className="flex items-center gap-2">
+                  {viewport.isMobile && (
+                    <button
+                      type="button"
+                      onClick={() => setMobileFiltersOpen(!mobileFiltersOpen)}
+                      className="px-3 py-2 rounded-xl border border-gray-200 bg-gray-50 text-xs font-bold text-gray-700 flex items-center gap-1"
+                    >
+                      <Filter className="w-3.5 h-3.5" />
+                      <span>{mobileFiltersOpen ? 'Ocultar' : 'Filtros'}</span>
+                    </button>
+                  )}
+
+                  {!isCajero && payments.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={exportToCsv}
+                      className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-2 sm:py-1.5 rounded-xl sm:rounded-lg transition"
+                    >
+                      ⬇ CSV
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <form
-                onSubmit={handleApplyFilters}
-                className={`grid grid-cols-1 sm:grid-cols-2 ${
-                  isCajero ? 'lg:grid-cols-4' : 'lg:grid-cols-6'
-                } gap-4 items-end`}
-              >
-                <div>
-                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
-                    Buscar
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      placeholder="Cliente, cód, monto..."
-                      className="w-full pl-9 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-1 focus:ring-yape outline-none"
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                    />
-                    <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+              {(!viewport.isMobile || mobileFiltersOpen) && (
+                <form
+                  onSubmit={handleApplyFilters}
+                  className={`grid grid-cols-1 sm:grid-cols-2 ${
+                    isCajero ? 'lg:grid-cols-4' : 'lg:grid-cols-6'
+                  } gap-3 sm:gap-4 items-end mt-3 pt-3 border-t border-gray-100`}
+                >
+                  {!viewport.isMobile && (
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
+                        Buscar
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Cliente, cód, monto..."
+                          className="w-full pl-9 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-1 focus:ring-yape outline-none"
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                        />
+                        <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
+                      Billetera / Banco
+                    </label>
+                    <select
+                      className="w-full px-3 py-2 sm:py-1.5 border border-gray-300 rounded-lg text-sm bg-white font-medium outline-none"
+                      value={bankFilter}
+                      onChange={(e) => setBankFilter(e.target.value)}
+                    >
+                      <option value="">Todos (Yape, Plin, BBVA)</option>
+                      <option value="YAPE">Solo Yape</option>
+                      <option value="PLIN">Solo Plin</option>
+                      <option value="BBVA">Solo BBVA</option>
+                    </select>
                   </div>
-                </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
-                    Billetera / Banco
-                  </label>
-                  <select
-                    className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white font-medium outline-none"
-                    value={bankFilter}
-                    onChange={(e) => setBankFilter(e.target.value)}
-                  >
-                    <option value="">Todos (Yape, Plin, BBVA)</option>
-                    <option value="YAPE">Solo Yape</option>
-                    <option value="PLIN">Solo Plin</option>
-                    <option value="BBVA">Solo BBVA</option>
-                  </select>
-                </div>
+                  {!isCajero && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
+                          Desde Fecha
+                        </label>
+                        <input
+                          type="date"
+                          className="w-full px-3 py-2 sm:py-1.5 border border-gray-300 rounded-lg text-sm outline-none"
+                          value={startDate}
+                          onChange={(e) => setStartDate(e.target.value)}
+                        />
+                      </div>
 
-                {!isCajero && (
-                  <>
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
-                        Desde Fecha
-                      </label>
-                      <input
-                        type="date"
-                        className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm outline-none"
-                        value={startDate}
-                        onChange={(e) => setStartDate(e.target.value)}
-                      />
-                    </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
+                          Hasta Fecha
+                        </label>
+                        <input
+                          type="date"
+                          className="w-full px-3 py-2 sm:py-1.5 border border-gray-300 rounded-lg text-sm outline-none"
+                          value={endDate}
+                          onChange={(e) => setEndDate(e.target.value)}
+                        />
+                      </div>
+                    </>
+                  )}
 
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
-                        Hasta Fecha
-                      </label>
-                      <input
-                        type="date"
-                        className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm outline-none"
-                        value={endDate}
-                        onChange={(e) => setEndDate(e.target.value)}
-                      />
-                    </div>
-                  </>
-                )}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
+                      Estado
+                    </label>
+                    <select
+                      className="w-full px-3 py-2 sm:py-1.5 border border-gray-300 rounded-lg text-sm bg-white outline-none"
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                    >
+                      <option value="">Todos los estados</option>
+                      <option value="0">Pendientes</option>
+                      <option value="1">Validados</option>
+                    </select>
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">
-                    Estado
-                  </label>
-                  <select
-                    className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white outline-none"
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                  >
-                    <option value="">Todos los estados</option>
-                    <option value="0">Pendientes</option>
-                    <option value="1">Validados</option>
-                  </select>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="submit"
-                    className="flex-1 bg-yape hover:bg-yape-dark text-white font-bold py-1.5 px-4 rounded-lg text-sm shadow-sm transition"
-                  >
-                    Filtrar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleClearFilters}
-                    className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-1.5 px-4 rounded-lg text-sm transition"
-                  >
-                    Limpiar
-                  </button>
-                </div>
-              </form>
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      className="flex-1 bg-yape hover:bg-yape-dark text-white font-bold py-2 sm:py-1.5 px-4 rounded-lg text-sm shadow-sm transition"
+                    >
+                      Filtrar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearFilters}
+                      className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 sm:py-1.5 px-4 rounded-lg text-sm transition"
+                    >
+                      Limpiar
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
 
-            {/* Tabla de Pagos */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200 text-xs font-bold text-gray-500 uppercase tracking-wider">
-                      <th className="px-6 py-3.5">Canal</th>
-                      <th className="px-6 py-3.5">Remitente</th>
-                      <th className="px-6 py-3.5">Monto</th>
-                      <th className="px-6 py-3.5">Fecha y Hora</th>
-                      <th className="px-6 py-3.5">Cód. Seguridad</th>
-                      <th className="px-6 py-3.5">Estado</th>
-                      <th className="px-6 py-3.5 text-right">Acción</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100 text-sm text-gray-700">
-                    {loading && payments.length === 0 ? (
-                      <tr>
-                        <td colSpan="7" className="text-center py-10 text-gray-400">
-                          <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-yape" />
-                          Cargando registros...
-                        </td>
+            {/* LISTA DE PAGOS ADAPTATIVA: TARJETAS TÁCTILES EN CELULAR/TABLET vs TABLA EN PC */}
+            {loading && payments.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-200 py-12 text-center text-gray-400">
+                <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-yape" />
+                Cargando registros...
+              </div>
+            ) : filteredPayments.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-200 py-12 text-center text-sm text-gray-400">
+                No se encontraron pagos con los filtros seleccionados
+              </div>
+            ) : viewport.useCardLayout ? (
+              /* MODO CELULAR Y TABLET: Tarjetas Táctiles de Pagos */
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {filteredPayments.map((p) => {
+                  const isBbva = (p.banco || '').toUpperCase() === 'BBVA';
+                  return (
+                    <div
+                      key={p.id}
+                      className={`bg-white rounded-2xl border p-4 shadow-sm transition ${
+                        p.validado === 0
+                          ? isBbva
+                            ? 'border-blue-300 bg-blue-50/10'
+                            : 'border-purple-300 bg-yellow-50/10'
+                          : 'border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            {renderBankBadge(p.banco)}
+                            {p.codigo_seguridad && (
+                              <span className="font-mono font-extrabold text-xs bg-purple-50 text-yape border border-purple-200 px-2 py-0.5 rounded-md">
+                                Cód: {p.codigo_seguridad}
+                              </span>
+                            )}
+                          </div>
+                          <h4 className="font-extrabold text-gray-900 text-base leading-snug">
+                            {p.remitente}
+                          </h4>
+                          <p className="text-xs text-gray-400">{formatFecha(p.timestamp)}</p>
+                        </div>
+
+                        <div className="text-right flex-shrink-0">
+                          <div className="flex items-center justify-end gap-1">
+                            <span
+                              className={`text-xl font-black ${
+                                isBbva ? 'text-[#004481]' : 'text-yape'
+                              }`}
+                            >
+                              S/ {Number(p.monto || 0).toFixed(2)}
+                            </span>
+                            <button
+                              onClick={() =>
+                                speakPayment({
+                                  monto: p.monto,
+                                  remitente: p.remitente,
+                                  banco: p.banco || 'YAPE',
+                                  soundEnabled: true,
+                                  includeSender,
+                                  volume: soundVolume
+                                })
+                              }
+                              className="p-1.5 rounded-lg bg-gray-100 text-gray-600 active:bg-purple-100"
+                              title="Escuchar voz"
+                            >
+                              <Volume2 className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          <div className="mt-1">
+                            {p.validado === 1 ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-green-100 text-green-800">
+                                <Check className="w-3 h-3" /> Validado ({formatFechaValidacion(p.fecha_validacion)})
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-yellow-100 text-yellow-800">
+                                <Clock className="w-3 h-3" /> Pendiente
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 pt-2.5 border-t border-gray-100 flex items-center gap-2">
+                        {p.validado === 0 ? (
+                          <button
+                            onClick={() => validatePayment(p.id)}
+                            className="flex-1 bg-emerald-600 active:bg-emerald-700 text-white font-bold py-2.5 px-3 rounded-xl text-xs shadow-sm flex items-center justify-center gap-1"
+                          >
+                            <Check className="w-4 h-4" />
+                            <span>Validar Pedido</span>
+                          </button>
+                        ) : (
+                          <span className="flex-1 text-xs text-gray-400 font-medium">
+                            Atendido por: {p.usuario_validador || 'caja'}
+                          </span>
+                        )}
+
+                        <button
+                          onClick={() => shareOnWhatsApp(p)}
+                          className="bg-emerald-50 active:bg-emerald-100 text-emerald-700 font-bold text-xs py-2.5 px-3 rounded-xl border border-emerald-200 flex items-center gap-1"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>WhatsApp</span>
+                        </button>
+
+                        {!isCajero && (
+                          <button
+                            onClick={(e) => deleteSinglePayment(p.id, e)}
+                            className="p-2.5 rounded-xl text-gray-400 hover:text-red-600 bg-gray-50"
+                            title="Eliminar pago"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* MODO PC: Tabla Completa de Escritorio */
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200 text-xs font-bold text-gray-500 uppercase tracking-wider">
+                        <th className="px-5 py-3.5">Canal</th>
+                        <th className="px-5 py-3.5">Remitente</th>
+                        <th className="px-5 py-3.5">Monto</th>
+                        <th className="px-5 py-3.5">Fecha y Hora</th>
+                        <th className="px-5 py-3.5">Cód. Seguridad</th>
+                        <th className="px-5 py-3.5">Estado</th>
+                        <th className="px-5 py-3.5 text-right">Acción</th>
                       </tr>
-                    ) : filteredPayments.length === 0 ? (
-                      <tr>
-                        <td colSpan="7" className="text-center py-10 text-gray-400">
-                          No se encontraron pagos con los filtros seleccionados
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredPayments.map((p) => {
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 text-sm text-gray-700">
+                      {filteredPayments.map((p) => {
                         const isBbva = (p.banco || '').toUpperCase() === 'BBVA';
                         return (
                           <tr
@@ -1025,9 +1186,9 @@ function App() {
                               p.validado === 0 ? (isBbva ? 'bg-blue-50/20' : 'bg-yellow-50/20') : ''
                             }`}
                           >
-                            <td className="px-6 py-4">{renderBankBadge(p.banco)}</td>
-                            <td className="px-6 py-4 font-semibold text-gray-900">{p.remitente}</td>
-                            <td className="px-6 py-4">
+                            <td className="px-5 py-3.5">{renderBankBadge(p.banco)}</td>
+                            <td className="px-5 py-3.5 font-semibold text-gray-900">{p.remitente}</td>
+                            <td className="px-5 py-3.5">
                               <div className="flex items-center gap-2">
                                 <span
                                   className={`font-extrabold text-base ${
@@ -1054,8 +1215,8 @@ function App() {
                                 </button>
                               </div>
                             </td>
-                            <td className="px-6 py-4 text-gray-500">{formatFecha(p.timestamp)}</td>
-                            <td className="px-6 py-4">
+                            <td className="px-5 py-3.5 text-gray-500">{formatFecha(p.timestamp)}</td>
+                            <td className="px-5 py-3.5">
                               {p.codigo_seguridad ? (
                                 <span className="inline-block font-mono font-extrabold text-sm bg-purple-50 text-yape border border-purple-200 px-2.5 py-0.5 rounded-md">
                                   {p.codigo_seguridad}
@@ -1064,7 +1225,7 @@ function App() {
                                 <span className="text-gray-400">{isBbva ? 'QR BBVA' : '-'}</span>
                               )}
                             </td>
-                            <td className="px-6 py-4">
+                            <td className="px-5 py-3.5">
                               {p.validado === 1 ? (
                                 <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-800">
                                   <Check className="w-3.5 h-3.5" />
@@ -1077,7 +1238,7 @@ function App() {
                                 </div>
                               )}
                             </td>
-                            <td className="px-6 py-4 text-right">
+                            <td className="px-5 py-3.5 text-right">
                               <div className="flex items-center justify-end gap-2">
                                 {p.validado === 0 ? (
                                   <button
@@ -1092,11 +1253,10 @@ function App() {
                                   </span>
                                 )}
 
-                                {/* Botón Reenviar a WhatsApp (Estilo Revísalo) */}
                                 <button
                                   onClick={() => shareOnWhatsApp(p)}
                                   className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 transition flex items-center gap-1"
-                                  title="Enviar comprobante verificado por WhatsApp a Delivery / Cocina"
+                                  title="Enviar comprobante verificado por WhatsApp"
                                 >
                                   <ExternalLink className="w-3.5 h-3.5" />
                                   <span className="hidden xl:inline">WhatsApp</span>
@@ -1115,15 +1275,94 @@ function App() {
                             </td>
                           </tr>
                         );
-                      })
-                    )}
-                  </tbody>
-                </table>
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
+            )}
           </>
         )}
       </main>
+
+      {/* BARRA DE NAVEGACIÓN INFERIOR TIPO APP NATIVA (EXCLUSIVA PARA CELULAR) */}
+      {viewport.isMobile && (
+        <div className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-gray-200 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] pb-safe">
+          <div className="grid grid-cols-4 h-16">
+            {isSuperAdmin ? (
+              <>
+                <button
+                  onClick={() => setActiveTab('clientes')}
+                  className={`flex flex-col items-center justify-center gap-1 text-[11px] font-bold ${
+                    activeTab === 'clientes' ? 'text-yape' : 'text-gray-400'
+                  }`}
+                >
+                  <Building2 className="w-5 h-5" />
+                  <span>Clientes</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('pagos')}
+                  className={`flex flex-col items-center justify-center gap-1 text-[11px] font-bold ${
+                    activeTab === 'pagos' ? 'text-yape' : 'text-gray-400'
+                  }`}
+                >
+                  <Coins className="w-5 h-5" />
+                  <span>Pagos</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setActiveTab('pagos')}
+                  className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold text-yape"
+                >
+                  <Coins className="w-5 h-5" />
+                  <span>Pagos Hoy</span>
+                </button>
+                {isDueno ? (
+                  <button
+                    onClick={() => setShowTenantModal(true)}
+                    className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold text-gray-500 active:text-yape"
+                  >
+                    <Users className="w-5 h-5" />
+                    <span>Mi Negocio</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowSoundModal(true)}
+                    className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold text-gray-500 active:text-yape"
+                  >
+                    <Settings className="w-5 h-5" />
+                    <span>Ajustes Voz</span>
+                  </button>
+                )}
+              </>
+            )}
+
+            <button
+              onClick={() => {
+                const next = !soundEnabled;
+                setSoundEnabled(next);
+                if (next) playChime(soundVolume);
+              }}
+              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-bold ${
+                soundEnabled ? 'text-emerald-600' : 'text-red-500'
+              }`}
+            >
+              {soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+              <span>{soundEnabled ? 'Voz ON' : 'Mudo'}</span>
+            </button>
+
+            <button
+              onClick={fetchPayments}
+              className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold text-gray-500 active:text-yape"
+            >
+              <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin text-yape' : ''}`} />
+              <span>Actualizar</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Modal Configuración Mi Negocio (Dueño) */}
       {showTenantModal && (
@@ -1140,28 +1379,29 @@ function App() {
         />
       )}
 
-      {/* Modal Configuración del Parlante */}
+      {/* Modal Configuración del Parlante (Cabecera fija + scroll seguro) */}
       {showSoundModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-gray-100 relative">
-            <button
-              onClick={() => setShowSoundModal(false)}
-              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-yape/10 text-yape flex items-center justify-center">
-                <Volume2 className="w-5 h-5" />
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl max-w-md w-full border border-gray-100 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-full bg-yape/10 text-yape flex items-center justify-center">
+                  <Volume2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-gray-800">Configuración del Parlante</h3>
+                  <p className="text-[11px] text-gray-500">Modo: {viewport.deviceLabel}</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-lg font-bold text-gray-800">Configuración del Parlante</h3>
-                <p className="text-xs text-gray-500">Anuncios de voz al recibir pagos en tiempo real</p>
-              </div>
+              <button
+                onClick={() => setShowSoundModal(false)}
+                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div className="space-y-4 text-sm text-gray-700">
+            <div className="p-5 overflow-y-auto modal-scroll flex-1 space-y-3.5 text-sm text-gray-700 pb-safe">
               <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
                 <div>
                   <span className="font-semibold block">Voz en Parlante</span>
@@ -1204,68 +1444,70 @@ function App() {
                 />
               </div>
 
-              <div className="pt-2 space-y-2">
+              <button
+                type="button"
+                onClick={() => {
+                  speakPayment({
+                    monto: 50.0,
+                    remitente: includeSender ? 'Juan Pérez' : '',
+                    banco: 'YAPE',
+                    soundEnabled: true,
+                    includeSender,
+                    volume: soundVolume
+                  });
+                  setActiveToast({
+                    id: 999,
+                    monto: 50.0,
+                    remitente: 'Juan Pérez (Prueba Yape)',
+                    codigo_seguridad: '482',
+                    banco: 'YAPE'
+                  });
+                }}
+                className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yape to-yape-dark text-white font-bold py-2.5 px-4 rounded-xl shadow-md transition"
+              >
+                <Play className="w-4 h-4 fill-white" />
+                <span>Probar Voz Yape (S/ 50.00)</span>
+              </button>
+
+              <div className="flex justify-end pt-1">
                 <button
-                  type="button"
-                  onClick={() => {
-                    speakPayment({
-                      monto: 50.0,
-                      remitente: includeSender ? 'Juan Pérez' : '',
-                      banco: 'YAPE',
-                      soundEnabled: true,
-                      includeSender,
-                      volume: soundVolume
-                    });
-                    setActiveToast({
-                      id: 999,
-                      monto: 50.0,
-                      remitente: 'Juan Pérez (Prueba Yape)',
-                      codigo_seguridad: '482',
-                      banco: 'YAPE'
-                    });
-                  }}
-                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-yape to-yape-dark text-white font-bold py-2.5 px-4 rounded-xl shadow-md transition"
+                  onClick={() => setShowSoundModal(false)}
+                  className="w-full sm:w-auto bg-gray-800 hover:bg-gray-900 text-white text-xs font-bold py-2.5 px-5 rounded-xl transition"
                 >
-                  <Play className="w-4 h-4 fill-white" />
-                  <span>Probar Voz Yape (S/ 50.00)</span>
+                  Listo
                 </button>
               </div>
-            </div>
-
-            <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => setShowSoundModal(false)}
-                className="bg-gray-800 hover:bg-gray-900 text-white text-xs font-bold py-2 px-5 rounded-lg transition"
-              >
-                Listo
-              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Toast Flotante de Nuevo Pago */}
+      {/* Toast Flotante Adaptativo (Arriba de la barra inferior en Celular, esquina inferior derecha en PC/Tablet) */}
       {activeToast &&
         (() => {
           const isBbvaToast = (activeToast.banco || '').toUpperCase() === 'BBVA';
           return (
             <div
-              className={`fixed bottom-6 right-6 z-50 max-w-sm w-full bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border-2 ${
+              className={`fixed z-50 bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border-2 p-4 ${
                 isBbvaToast ? 'border-[#004481]' : 'border-yape'
-              } p-4`}
+              } ${
+                viewport.isMobile
+                  ? 'left-3 right-3 bottom-20'
+                  : 'bottom-6 right-6 max-w-sm w-full'
+              }`}
             >
               <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0">
                   <div
-                    className={`w-12 h-12 rounded-xl text-white flex items-center justify-center flex-shrink-0 shadow-md ${
+                    className={`w-11 h-11 rounded-xl text-white flex items-center justify-center flex-shrink-0 shadow-md ${
                       isBbvaToast
                         ? 'bg-gradient-to-tr from-[#004481] to-[#00a9e0]'
                         : 'bg-gradient-to-tr from-yape to-yape-light'
                     }`}
                   >
-                    <Coins className="w-7 h-7" />
+                    <Coins className="w-6 h-6" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
                       <span
                         className={`w-2.5 h-2.5 rounded-full animate-ping ${
@@ -1280,36 +1522,33 @@ function App() {
                         ¡{activeToast.banco || 'YAPE'} Recibido!
                       </span>
                     </div>
-                    <h4 className="text-2xl font-black text-gray-900 mt-0.5">
+                    <h4 className="text-xl sm:text-2xl font-black text-gray-900">
                       S/ {Number(activeToast.monto).toFixed(2)}
                     </h4>
-                    <p className="text-xs font-semibold text-gray-600 truncate max-w-[180px]">
+                    <p className="text-xs font-semibold text-gray-600 truncate">
                       {activeToast.remitente || 'Cliente'}
                     </p>
-                    {activeToast.codigo_seguridad && (
-                      <span className="inline-block text-[10px] font-bold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded mt-1">
-                        Cód: {activeToast.codigo_seguridad}
-                      </span>
-                    )}
                   </div>
                 </div>
 
                 <button
                   onClick={() => setActiveToast(null)}
-                  className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100"
+                  className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 flex-shrink-0"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between">
-                <span className="text-[11px] text-gray-400">Hace unos segundos</span>
+              <div className="mt-2.5 pt-2 border-t border-gray-100 flex items-center justify-between">
+                <span className="text-[11px] font-bold text-gray-500">
+                  {activeToast.codigo_seguridad ? `Cód: ${activeToast.codigo_seguridad}` : 'Ahora mismo'}
+                </span>
                 <button
                   onClick={() => {
                     validatePayment(activeToast.id);
                     setActiveToast(null);
                   }}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1 rounded-lg transition flex items-center gap-1 shadow-sm"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg transition flex items-center gap-1 shadow-sm"
                 >
                   <Check className="w-3.5 h-3.5" />
                   <span>Validar Pago</span>
