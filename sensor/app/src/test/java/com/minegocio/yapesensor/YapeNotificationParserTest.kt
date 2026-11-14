@@ -14,7 +14,8 @@ class YapeNotificationParserTest {
         assertNotNull(result)
         assertEquals("Juan Perez", result?.remitente)
         assertEquals(20.0, result?.monto ?: 0.0, 0.001)
-        assertEquals(null, result?.codigoSeguridad)
+        assertNull(result?.codigoSeguridad)
+        assertEquals("YAPE", result?.banco)
     }
 
     @Test
@@ -51,6 +52,126 @@ class YapeNotificationParserTest {
         assertNotNull(result)
         assertEquals("Pedro", result?.remitente)
         assertEquals(50.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseTeAcabanDeYapear() {
+        val text = "Te acaban de yapear S/ 35.00 de Raul Diaz"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Raul Diaz", result?.remitente)
+        assertEquals(35.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseTeLlegoUnYape() {
+        val text = "Te llegó un yape de S/ 40.00 de Sofia Castro"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Sofia Castro", result?.remitente)
+        assertEquals(40.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseSenderFirstTeYapeo() {
+        val text = "Juan Perez te yapeó S/ 10.00"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Juan Perez", result?.remitente)
+        assertEquals(10.0, result?.monto ?: 0.0, 0.001)
+        assertEquals("YAPE", result?.banco)
+    }
+
+    @Test
+    fun testParseSenderFirstTeYapeoWithSecurityCode() {
+        val text = "Juan Perez te yapeó S/ 10.00. El cód. de seguridad es: 123"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Juan Perez", result?.remitente)
+        assertEquals(10.0, result?.monto ?: 0.0, 0.001)
+        assertEquals("123", result?.codigoSeguridad)
+    }
+
+    @Test
+    fun testParseSenderFirstTeEnvioUnPagoDe() {
+        val text = "Juan Perez te envió un pago de S/ 10.00"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Juan Perez", result?.remitente)
+        assertEquals(10.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseSenderFirstTeEnvio() {
+        val text = "Maria Quispe te envió S/ 25.50"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Maria Quispe", result?.remitente)
+        assertEquals(25.50, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseSenderFirstTeTransfirio() {
+        val text = "Carlos Torres te transfirió S/ 80.00"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Carlos Torres", result?.remitente)
+        assertEquals(80.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseSenderFirstTeAcabaDeYapear() {
+        val text = "Ana Lopez te acaba de yapear S/ 50.00"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Ana Lopez", result?.remitente)
+        assertEquals(50.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseRecibisteUnYape() {
+        val text = "Recibiste un Yape de S/ 12.00 de Luis Ramos"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Luis Ramos", result?.remitente)
+        assertEquals(12.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseRecibisteMontoDe() {
+        val text = "Recibiste S/ 18.00 de Carmen Soto"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Carmen Soto", result?.remitente)
+        assertEquals(18.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseHasRecibido() {
+        val text = "Has recibido un pago de S/ 70.00 de Fernando Alva"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Fernando Alva", result?.remitente)
+        assertEquals(70.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseHasRecibidoDeXPorS() {
+        val text = "Has recibido un Yape de Fernando Alva por S/ 70.00"
+        val result = YapeNotificationParser.parse("Yape", text)
+        assertNotNull(result)
+        assertEquals("Fernando Alva", result?.remitente)
+        assertEquals(70.0, result?.monto ?: 0.0, 0.001)
+    }
+
+    @Test
+    fun testParseTitleAsSender() {
+        val title = "JUAN CARLOS PEREZ"
+        val text = "Te yapeó S/ 15.00"
+        val result = YapeNotificationParser.parse(title, text)
+        assertNotNull(result)
+        assertEquals("JUAN CARLOS PEREZ", result?.remitente)
+        assertEquals(15.0, result?.monto ?: 0.0, 0.001)
     }
 
     @Test
@@ -103,5 +224,15 @@ class YapeNotificationParserTest {
         assertEquals("BARBARA ROSE CHAC VELA", result4?.remitente)
         assertEquals(49.9, result4?.monto ?: 0.0, 0.001)
         assertEquals("BBVA", result4?.banco)
+    }
+
+    @Test
+    fun testParsePlinPayment() {
+        val text = "Te plineó S/ 25.00 de Manuel Prado"
+        val result = YapeNotificationParser.parse("Plin", text, packageName = "pe.com.interbank.mobilebanking")
+        assertNotNull(result)
+        assertEquals("Manuel Prado", result?.remitente)
+        assertEquals(25.0, result?.monto ?: 0.0, 0.001)
+        assertEquals("PLIN", result?.banco)
     }
 }

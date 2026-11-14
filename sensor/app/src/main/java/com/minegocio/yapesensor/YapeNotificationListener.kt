@@ -77,13 +77,26 @@ class YapeNotificationListener : NotificationListenerService() {
         val isPaymentCandidate = packageName.equals(YAPE_PACKAGE_NAME, ignoreCase = true) ||
                 packageName.contains("yape", ignoreCase = true) ||
                 packageName.contains("bbva", ignoreCase = true) ||
+                packageName.contains("bcp", ignoreCase = true) ||
+                packageName.contains("plin", ignoreCase = true) ||
+                packageName.contains("interbank", ignoreCase = true) ||
                 combinedSearchText.contains("yape") ||
                 combinedSearchText.contains("bbva") ||
+                combinedSearchText.contains("plin") ||
                 combinedSearchText.contains("cobro con qr") ||
-                combinedSearchText.contains("te yapeó") ||
-                combinedSearchText.contains("te envió un pago") ||
+                combinedSearchText.contains("te yape") ||
+                combinedSearchText.contains("te han yapeado") ||
+                combinedSearchText.contains("te acaban de yapear") ||
+                combinedSearchText.contains("te envió") ||
+                combinedSearchText.contains("te envio") ||
                 combinedSearchText.contains("te hizo un pago") ||
-                combinedSearchText.contains("confirmación de pago")
+                combinedSearchText.contains("te transfiri") ||
+                combinedSearchText.contains("recibiste") ||
+                combinedSearchText.contains("has recibido") ||
+                combinedSearchText.contains("confirmación de pago") ||
+                combinedSearchText.contains("confirmacion de pago") ||
+                combinedSearchText.contains("pago recibido") ||
+                combinedSearchText.contains("nuevo pago")
 
         if (!isPaymentCandidate) {
             return
