@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Building2, Users, Plus, Copy, Check, ShieldAlert,
-  Power, Trash2, Key, RefreshCw, Play, X, Coins, Clock, CheckCircle, Sparkles
+  Power, Trash2, Key, RefreshCw, Play, X, Coins, Clock, CheckCircle, Sparkles, Edit3, Save
 } from 'lucide-react';
 import { useDeviceViewport } from '../utils/useDeviceViewport';
 
@@ -40,16 +40,27 @@ ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS usuario_validador TEXT;
 ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS fecha_validacion TIMESTAMPTZ;
 ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS nota_pedido TEXT;`;
 
+function isoToDateInput(isoStr) {
+  if (!isoStr) return '';
+  try {
+    return new Date(isoStr).toISOString().slice(0, 10);
+  } catch {
+    return '';
+  }
+}
+
 export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter }) {
   const viewport = useDeviceViewport();
   const [negocios, setNegocios] = useState([]);
   const [schemaReady, setSchemaReady] = useState(true);
   const [loading, setLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [selectedNegocioModal, setSelectedNegocioModal] = useState(null);
+  const [editingNegocio, setEditingNegocio] = useState(null);
+  const [editTab, setEditTab] = useState('datos'); // 'datos' | 'usuarios'
   const [copiedId, setCopiedId] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [actionMsg, setActionMsg] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const [form, setForm] = useState({
     nombre_comercial: '',
@@ -64,6 +75,22 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
     webhook_url: '',
     whatsapp_alerta: ''
   });
+
+  // Estado del formulario de edición del cliente seleccionado
+  const [editForm, setEditForm] = useState({
+    nombre_comercial: '',
+    ruc_o_telefono: '',
+    plan: 'MENSUAL',
+    estado: 'ACTIVO',
+    precio_plan: '29.90',
+    fecha_vencimiento_date: '',
+    webhook_url: '',
+    whatsapp_alerta: '',
+    notas_admin: ''
+  });
+
+  // Estado editable de usuarios del cliente abierto
+  const [userDrafts, setUserDrafts] = useState({});
 
   const [newUserForm, setNewUserForm] = useState({
     username: '',
@@ -91,7 +118,9 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       const data = await res.json();
       if (res.ok) {
         setSchemaReady(data.schemaReady !== false);
-        setNegocios(data.negocios || []);
+        const list = data.negocios || [];
+        setNegocios(list);
+        return list;
       } else {
         setErrorMsg(data.error || 'No se pudo cargar la lista de clientes');
       }
@@ -99,6 +128,151 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       setErrorMsg('Error de conexión con /api/admin');
     } finally {
       setLoading(false);
+    }
+    return [];
+  };
+
+  const openEditClientModal = (neg, defaultTab = 'datos') => {
+    setEditingNegocio(neg);
+    setEditTab(defaultTab);
+    setEditForm({
+      nombre_comercial: neg.nombre_comercial || '',
+      ruc_o_telefono: neg.ruc_o_telefono || '',
+      plan: neg.plan || 'MENSUAL',
+      estado: neg.estado || 'ACTIVO',
+      precio_plan: String(neg.precio_plan ?? '29.90'),
+      fecha_vencimiento_date: isoToDateInput(neg.fecha_vencimiento),
+      webhook_url: neg.webhook_url || '',
+      whatsapp_alerta: neg.whatsapp_alerta || '',
+      notas_admin: neg.notas_admin || ''
+    });
+
+    const drafts = {};
+    (neg.usuarios || []).forEach((u) => {
+      drafts[u.id] = {
+        username: u.username || '',
+        password: u.password || '',
+        rol: u.rol || 'CAJERO',
+        activo: u.activo !== false
+      };
+    });
+    setUserDrafts(drafts);
+  };
+
+  const handleSaveClientDetails = async (e) => {
+    e.preventDefault();
+    if (!editingNegocio) return;
+    setSavingEdit(true);
+    try {
+      const fechaIso = editForm.fecha_vencimiento_date
+        ? new Date(`${editForm.fecha_vencimiento_date}T23:59:59`).toISOString()
+        : editingNegocio.fecha_vencimiento;
+
+      const res = await fetch(`${apiUrl}/api/admin`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'update_settings',
+          negocio_id: editingNegocio.id,
+          nombre_comercial: editForm.nombre_comercial,
+          ruc_o_telefono: editForm.ruc_o_telefono,
+          plan: editForm.plan,
+          estado: editForm.estado,
+          precio_plan: editForm.precio_plan,
+          fecha_vencimiento: fechaIso,
+          webhook_url: editForm.webhook_url,
+          whatsapp_alerta: editForm.whatsapp_alerta,
+          notas_admin: editForm.notas_admin
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'No se pudo actualizar el cliente');
+        return;
+      }
+
+      const freshList = await fetchNegocios();
+      const updatedNeg = freshList.find((n) => n.id === editingNegocio.id);
+      if (updatedNeg) setEditingNegocio(updatedNeg);
+      showTempMessage(`Datos de "${editForm.nombre_comercial}" guardados correctamente.`);
+      setEditingNegocio(null);
+    } catch {
+      alert('Error de red al guardar cambios');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleRegenerateClientKey = async () => {
+    if (!editingNegocio) return;
+    if (
+      !window.confirm(
+        '¿Generar una nueva API Key para este cliente? Su celular Android actual deberá actualizarse con la nueva llave.'
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`${apiUrl}/api/admin`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'regenerate_apikey',
+          negocio_id: editingNegocio.id
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const freshList = await fetchNegocios();
+        const refreshed = freshList.find((n) => n.id === editingNegocio.id);
+        if (refreshed) setEditingNegocio(refreshed);
+        showTempMessage('Nueva API Key generada con éxito.');
+      }
+    } catch {
+      alert('Error al regenerar API Key');
+    }
+  };
+
+  const handleSaveExistingUser = async (userId) => {
+    const draft = userDrafts[userId];
+    if (!draft || !draft.username.trim() || !draft.password) {
+      alert('El usuario y contraseña no pueden quedar vacíos.');
+      return;
+    }
+    try {
+      const res = await fetch(`${apiUrl}/api/admin`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: 'update_usuario',
+          usuario_id: userId,
+          username: draft.username,
+          password: draft.password,
+          rol: draft.rol,
+          activo: draft.activo
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'No se pudo actualizar el usuario');
+        return;
+      }
+      const freshList = await fetchNegocios();
+      const refreshed = freshList.find((n) => n.id === editingNegocio.id);
+      if (refreshed) openEditClientModal(refreshed, 'usuarios');
+      showTempMessage(`Usuario "${draft.username}" actualizado.`);
+    } catch {
+      alert('Error de conexión al actualizar usuario');
     }
   };
 
@@ -287,7 +461,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
 
   const handleAddUserToNegocio = async (e) => {
     e.preventDefault();
-    if (!selectedNegocioModal) return;
+    if (!editingNegocio) return;
     try {
       const res = await fetch(`${apiUrl}/api/admin`, {
         method: 'POST',
@@ -297,7 +471,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
         },
         body: JSON.stringify({
           action: 'create_usuario',
-          negocio_id: selectedNegocioModal.id,
+          negocio_id: editingNegocio.id,
           ...newUserForm
         })
       });
@@ -308,17 +482,9 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       }
       setNewUserForm({ username: '', password: '', nombre_mostrar: '', rol: 'CAJERO' });
       showTempMessage(`Usuario "${data.usuario.username}" agregado.`);
-      const updatedRes = await fetch(`${apiUrl}/api/admin`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const updatedData = await updatedRes.json();
-      if (updatedRes.ok) {
-        setNegocios(updatedData.negocios || []);
-        const refreshed = (updatedData.negocios || []).find(
-          (n) => n.id === selectedNegocioModal.id
-        );
-        if (refreshed) setSelectedNegocioModal(refreshed);
-      }
+      const freshList = await fetchNegocios();
+      const refreshed = freshList.find((n) => n.id === editingNegocio.id);
+      if (refreshed) openEditClientModal(refreshed, 'usuarios');
     } catch {
       alert('Error de red');
     }
@@ -331,12 +497,11 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
       headers: { Authorization: `Bearer ${token}` }
     });
     if (res.ok) {
-      fetchNegocios();
-      setSelectedNegocioModal((prev) =>
-        prev
-          ? { ...prev, usuarios: (prev.usuarios || []).filter((u) => u.id !== userId) }
-          : null
-      );
+      const freshList = await fetchNegocios();
+      if (editingNegocio) {
+        const refreshed = freshList.find((n) => n.id === editingNegocio.id);
+        if (refreshed) openEditClientModal(refreshed, 'usuarios');
+      }
     }
   };
 
@@ -474,7 +639,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
         </div>
       )}
 
-      {/* KPIs Comerciales (2x2 en celular/tablet, 4 columnas en PC) */}
+      {/* KPIs Comerciales */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="bg-white rounded-xl border border-gray-200 p-3.5 sm:p-5 shadow-sm flex items-center justify-between">
           <div>
@@ -524,7 +689,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
             Gestión de Empresas Suscriptoras y Licencias
           </h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Crea cuentas para tus clientes, entrégales su acceso de Dueño + Cajero y controla sus mensualidades.
+            Crea o edita clientes, cambia usuarios/contraseñas y controla sus mensualidades.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -546,13 +711,13 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
         </div>
       </div>
 
-      {/* VISTA ADAPTATIVA: TARJETAS TÁCTILES EN CELULAR/TABLET vs TABLA EN PC */}
+      {/* LISTA ADAPTATIVA: TARJETAS EN CELULAR/TABLET vs TABLA EN PC */}
       {negocios.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
           Aún no has registrado negocios clientes. Haz clic en <strong>+ Nuevo Cliente</strong> para vender tu primera suscripción.
         </div>
       ) : viewport.useCardLayout ? (
-        /* MODO CELULAR Y TABLET: Tarjetas Táctiles Responsivas */
+        /* MODO CELULAR Y TABLET */
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           {negocios.map((neg) => {
             const isSuspended = neg.estado !== 'ACTIVO';
@@ -581,7 +746,12 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                   <div>
                     <span className="text-gray-400 block text-[10px] uppercase font-bold">Dueño / Cajeros</span>
                     <span className="font-bold text-gray-800">{dueno ? dueno.username : '-'}</span>
-                    <span className="text-gray-500 block">{cajerosCount} cajero(s)</span>
+                    <button
+                      onClick={() => openEditClientModal(neg, 'usuarios')}
+                      className="text-yape font-bold block hover:underline"
+                    >
+                      {cajerosCount} cajero(s) (Editar →)
+                    </button>
                   </div>
                   <div>
                     <span className="text-gray-400 block text-[10px] uppercase font-bold">Volumen Procesado</span>
@@ -597,22 +767,21 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                   </div>
                 </div>
 
-                {/* Botones grandes para pantalla táctil */}
                 <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={() => openEditClientModal(neg, 'datos')}
+                    className="bg-yape active:bg-yape-dark text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm"
+                  >
+                    <Edit3 className="w-4 h-4" />
+                    <span>Editar Cliente</span>
+                  </button>
+
                   <button
                     onClick={() => copyText(buildWelcomeWhatsAppText(neg), `wa-${neg.id}`)}
                     className="bg-emerald-600 active:bg-emerald-700 text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm"
                   >
                     {copiedId === `wa-${neg.id}` ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                     <span>{copiedId === `wa-${neg.id}` ? '¡Copiado!' : 'Kit WhatsApp'}</span>
-                  </button>
-
-                  <button
-                    onClick={() => setSelectedNegocioModal(neg)}
-                    className="bg-purple-50 active:bg-purple-100 text-yape border border-purple-200 text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5"
-                  >
-                    <Users className="w-4 h-4" />
-                    <span>Usuarios / Key</span>
                   </button>
                 </div>
 
@@ -653,7 +822,7 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
           })}
         </div>
       ) : (
-        /* MODO PC / MONITOR DE ESCRITORIO: Tabla Completa */
+        /* MODO PC: Tabla Completa con botón Editar Cliente */
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
@@ -724,10 +893,10 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                           <Users className="w-3.5 h-3.5" />
                           <span>{cajerosCount} cajero(s)</span>
                           <button
-                            onClick={() => setSelectedNegocioModal(neg)}
+                            onClick={() => openEditClientModal(neg, 'usuarios')}
                             className="text-yape font-bold hover:underline ml-1"
                           >
-                            Gestionar
+                            Usuarios/Claves
                           </button>
                         </div>
                       </td>
@@ -747,12 +916,21 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                       <td className="px-5 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5 flex-wrap">
                           <button
+                            onClick={() => openEditClientModal(neg, 'datos')}
+                            className="bg-yape hover:bg-yape-dark text-white text-xs font-bold px-2.5 py-1.5 rounded-lg flex items-center gap-1 shadow-sm transition"
+                            title="Editar datos del cliente, plan, fecha o contraseñas"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>Editar</span>
+                          </button>
+
+                          <button
                             onClick={() => copyText(buildWelcomeWhatsAppText(neg), `wa-${neg.id}`)}
                             className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-1.5 rounded-lg flex items-center gap-1 shadow-sm transition"
                             title="Copiar mensaje completo de bienvenida para WhatsApp"
                           >
                             {copiedId === `wa-${neg.id}` ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                            <span>{copiedId === `wa-${neg.id}` ? '¡Copiado!' : 'Kit WhatsApp'}</span>
+                            <span>{copiedId === `wa-${neg.id}` ? '¡Copiado!' : 'WhatsApp'}</span>
                           </button>
 
                           <button
@@ -802,14 +980,13 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
         </div>
       )}
 
-      {/* MODAL RESPONSIVO: CREAR NUEVO CLIENTE (Cabecera y Pie fijos, cuerpo con scroll suave) */}
+      {/* MODAL: CREAR NUEVO CLIENTE */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-3">
           <form
             onSubmit={handleCreateNegocio}
             className="bg-white w-full sm:max-w-xl rounded-t-2xl sm:rounded-2xl shadow-2xl border border-gray-100 max-h-[94dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden"
           >
-            {/* Cabecera fija siempre visible */}
             <div className="px-4 sm:px-6 py-3.5 border-b border-gray-100 flex items-center justify-between flex-shrink-0 bg-white">
               <div>
                 <h3 className="text-base sm:text-lg font-extrabold text-gray-900">
@@ -828,7 +1005,6 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
               </button>
             </div>
 
-            {/* Cuerpo adaptable con scroll interno */}
             <div
               className={`px-4 sm:px-6 overflow-y-auto modal-scroll flex-1 text-sm ${
                 viewport.isCompactHeight ? 'py-3 space-y-3' : 'py-4 space-y-4'
@@ -970,7 +1146,6 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
               </div>
             </div>
 
-            {/* Pie fijo siempre visible */}
             <div className="px-4 sm:px-6 py-3 border-t border-gray-100 bg-gray-50 flex items-center justify-end gap-2 flex-shrink-0 pb-safe">
               <button
                 type="button"
@@ -990,126 +1165,385 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
         </div>
       )}
 
-      {/* MODAL RESPONSIVO: DETALLE DE USUARIOS Y API KEY */}
-      {selectedNegocioModal && (
+      {/* MODAL COMPLETO DE EDICIÓN DEL CLIENTE Y DE SUS USUARIOS */}
+      {editingNegocio && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-3">
-          <div className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl border border-gray-100 max-h-[92dvh] flex flex-col overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
-              <div className="min-w-0">
-                <h3 className="text-base sm:text-lg font-extrabold text-gray-900 truncate">
-                  {selectedNegocioModal.nombre_comercial}
-                </h3>
-                <p className="text-xs text-gray-500">
-                  Credenciales de cajeros y llave para el APK Android
-                </p>
-              </div>
-              <button
-                onClick={() => setSelectedNegocioModal(null)}
-                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-5 overflow-y-auto modal-scroll flex-1 space-y-4">
-              <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-gray-600 uppercase flex items-center gap-1">
-                    <Key className="w-3.5 h-3.5 text-yape" /> API Key del Sensor Android
-                  </span>
-                  <button
-                    onClick={() =>
-                      copyText(selectedNegocioModal.api_key, `modal-key-${selectedNegocioModal.id}`)
-                    }
-                    className="text-xs font-bold text-yape hover:underline"
-                  >
-                    {copiedId === `modal-key-${selectedNegocioModal.id}` ? '¡Copiada!' : 'Copiar Key'}
-                  </button>
-                </div>
-                <code className="block text-xs bg-white p-2 rounded border border-gray-200 break-all text-gray-800">
-                  {selectedNegocioModal.api_key}
-                </code>
-                <div className="text-[11px] text-gray-500 mt-1.5">
-                  URL Servidor: <code>{window.location.origin}</code>
-                </div>
-              </div>
-
-              <div>
-                <h4 className="text-xs font-bold text-gray-600 uppercase mb-2">
-                  Usuarios Registrados ({(selectedNegocioModal.usuarios || []).length})
-                </h4>
-                <div className="space-y-2">
-                  {(selectedNegocioModal.usuarios || []).map((u) => (
-                    <div
-                      key={u.id}
-                      className="flex items-center justify-between p-2.5 bg-gray-50 rounded-lg border border-gray-200 text-xs"
-                    >
-                      <div className="min-w-0">
-                        <span
-                          className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-extrabold mr-2 ${
-                            u.rol === 'DUENO'
-                              ? 'bg-purple-100 text-purple-800'
-                              : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {u.rol}
-                        </span>
-                        <span className="font-bold text-gray-900">{u.username}</span>
-                        <span className="text-gray-400 ml-2">Clave: {u.password}</span>
-                      </div>
-                      <button
-                        onClick={() => handleDeleteUser(u.id)}
-                        className="text-gray-400 hover:text-red-600 p-1"
-                        title="Eliminar usuario"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <form
-                onSubmit={handleAddUserToNegocio}
-                className="p-3.5 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-2.5"
-              >
-                <div className="text-xs font-extrabold text-emerald-900 uppercase">
-                  + Agregar Cajero o Sucursal Adicional
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <input
-                    type="text"
-                    required
-                    placeholder="Usuario (ej. caja2)"
-                    className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs"
-                    value={newUserForm.username}
-                    onChange={(e) => setNewUserForm({ ...newUserForm, username: e.target.value })}
-                  />
-                  <input
-                    type="text"
-                    required
-                    placeholder="Contraseña"
-                    className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs"
-                    value={newUserForm.password}
-                    onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
-                  />
-                  <select
-                    className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs font-semibold"
-                    value={newUserForm.rol}
-                    onChange={(e) => setNewUserForm({ ...newUserForm, rol: e.target.value })}
-                  >
-                    <option value="CAJERO">Rol: CAJERO</option>
-                    <option value="DUENO">Rol: DUEÑO</option>
-                  </select>
+          <div className="bg-white w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl border border-gray-100 max-h-[94dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+            {/* Cabecera fija con pestañas Datos vs Usuarios */}
+            <div className="px-4 sm:px-6 pt-3.5 pb-0 border-b border-gray-200 bg-white flex-shrink-0">
+              <div className="flex items-center justify-between mb-3">
+                <div className="min-w-0">
+                  <h3 className="text-base sm:text-lg font-extrabold text-gray-900 truncate">
+                    Editar Cliente: {editingNegocio.nombre_comercial}
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Modifica su plan, fecha de vencimiento, integraciones o contraseñas
+                  </p>
                 </div>
                 <button
-                  type="submit"
-                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-lg transition"
+                  type="button"
+                  onClick={() => setEditingNegocio(null)}
+                  className="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100 flex-shrink-0"
                 >
-                  Agregar Usuario
+                  <X className="w-5 h-5" />
                 </button>
-              </form>
+              </div>
+
+              <div className="flex gap-4 text-xs font-extrabold">
+                <button
+                  type="button"
+                  onClick={() => setEditTab('datos')}
+                  className={`pb-2.5 border-b-2 transition flex items-center gap-1.5 ${
+                    editTab === 'datos'
+                      ? 'border-yape text-yape'
+                      : 'border-transparent text-gray-400 hover:text-gray-700'
+                  }`}
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  <span>1. Datos, Plan y Vencimiento</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditTab('usuarios')}
+                  className={`pb-2.5 border-b-2 transition flex items-center gap-1.5 ${
+                    editTab === 'usuarios'
+                      ? 'border-yape text-yape'
+                      : 'border-transparent text-gray-400 hover:text-gray-700'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>2. Usuarios, Claves y API Key ({(editingNegocio.usuarios || []).length})</span>
+                </button>
+              </div>
             </div>
+
+            {/* PESTAÑA 1: EDITAR DATOS DEL CLIENTE */}
+            {editTab === 'datos' ? (
+              <form onSubmit={handleSaveClientDetails} className="flex flex-col flex-1 overflow-hidden">
+                <div className="p-4 sm:p-6 overflow-y-auto modal-scroll flex-1 space-y-3.5 text-sm">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Nombre Comercial *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-yape outline-none"
+                        value={editForm.nombre_comercial}
+                        onChange={(e) =>
+                          setEditForm({ ...editForm, nombre_comercial: e.target.value })
+                        }
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        RUC o Teléfono de Contacto
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-yape outline-none"
+                        value={editForm.ruc_o_telefono}
+                        onChange={(e) =>
+                          setEditForm({ ...editForm, ruc_o_telefono: e.target.value })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Plan
+                      </label>
+                      <select
+                        className="w-full px-2.5 py-2 border border-gray-300 rounded-lg bg-white font-semibold text-xs"
+                        value={editForm.plan}
+                        onChange={(e) => setEditForm({ ...editForm, plan: e.target.value })}
+                      >
+                        <option value="TRIAL">TRIAL</option>
+                        <option value="MENSUAL">MENSUAL</option>
+                        <option value="ANUAL">ANUAL</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Estado
+                      </label>
+                      <select
+                        className="w-full px-2.5 py-2 border border-gray-300 rounded-lg bg-white font-semibold text-xs"
+                        value={editForm.estado}
+                        onChange={(e) => setEditForm({ ...editForm, estado: e.target.value })}
+                      >
+                        <option value="ACTIVO">ACTIVO</option>
+                        <option value="SUSPENDIDO">SUSPENDIDO</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Tarifa (S/)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.10"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
+                        value={editForm.precio_plan}
+                        onChange={(e) => setEditForm({ ...editForm, precio_plan: e.target.value })}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Fecha Vencimiento
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        className="w-full px-2.5 py-2 border border-gray-300 rounded-lg text-xs"
+                        value={editForm.fecha_vencimiento_date}
+                        onChange={(e) =>
+                          setEditForm({ ...editForm, fecha_vencimiento_date: e.target.value })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        WhatsApp de Alertas / Delivery
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Ej: 51999888777"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
+                        value={editForm.whatsapp_alerta}
+                        onChange={(e) =>
+                          setEditForm({ ...editForm, whatsapp_alerta: e.target.value })
+                        }
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                        Webhook URL (WooCommerce / POS)
+                      </label>
+                      <input
+                        type="url"
+                        placeholder="https://mitienda.pe/api/webhook"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
+                        value={editForm.webhook_url}
+                        onChange={(e) => setEditForm({ ...editForm, webhook_url: e.target.value })}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                      Notas Internas del Administrador
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ej: Pagó por Yape el día 14, contacto Sr. Luis..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
+                      value={editForm.notas_admin}
+                      onChange={(e) => setEditForm({ ...editForm, notas_admin: e.target.value })}
+                    />
+                  </div>
+                </div>
+
+                <div className="px-4 sm:px-6 py-3 border-t border-gray-100 bg-gray-50 flex items-center justify-end gap-2 flex-shrink-0 pb-safe">
+                  <button
+                    type="button"
+                    onClick={() => setEditingNegocio(null)}
+                    className="px-4 py-2 rounded-xl bg-white border border-gray-200 hover:bg-gray-100 text-gray-700 font-bold text-xs"
+                  >
+                    Cerrar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit}
+                    className="px-5 py-2 rounded-xl bg-yape hover:bg-yape-dark text-white font-bold text-xs shadow-md flex items-center gap-1.5"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{savingEdit ? 'Guardando...' : 'Guardar Cambios'}</span>
+                  </button>
+                </div>
+              </form>
+            ) : (
+              /* PESTAÑA 2: EDITAR USUARIOS, CONTRASEÑAS Y API KEY */
+              <div className="p-4 sm:p-6 overflow-y-auto modal-scroll flex-1 space-y-4 pb-safe">
+                {/* API Key */}
+                <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <span className="text-xs font-bold text-gray-700 uppercase flex items-center gap-1">
+                      <Key className="w-3.5 h-3.5 text-yape" /> API Key del Sensor Android
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyText(editingNegocio.api_key, `modal-key-${editingNegocio.id}`)
+                        }
+                        className="text-xs font-bold text-yape hover:underline"
+                      >
+                        {copiedId === `modal-key-${editingNegocio.id}` ? '¡Copiada!' : 'Copiar Key'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRegenerateClientKey}
+                        className="text-xs font-bold text-amber-700 hover:underline"
+                      >
+                        Regenerar Key
+                      </button>
+                    </div>
+                  </div>
+                  <code className="block text-xs bg-white p-2 rounded border border-gray-200 break-all text-gray-800">
+                    {editingNegocio.api_key}
+                  </code>
+                </div>
+
+                {/* Edición directa de cada Usuario */}
+                <div>
+                  <h4 className="text-xs font-bold text-gray-600 uppercase mb-2">
+                    Editar Usuarios y Contraseñas ({(editingNegocio.usuarios || []).length})
+                  </h4>
+                  <div className="space-y-2.5">
+                    {(editingNegocio.usuarios || []).map((u) => {
+                      const draft = userDrafts[u.id] || {
+                        username: u.username,
+                        password: u.password,
+                        rol: u.rol
+                      };
+                      return (
+                        <div
+                          key={u.id}
+                          className="p-3 bg-gray-50 rounded-xl border border-gray-200 grid grid-cols-1 sm:grid-cols-12 gap-2 items-center text-xs"
+                        >
+                          <div className="sm:col-span-4">
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase">
+                              Usuario
+                            </label>
+                            <input
+                              type="text"
+                              className="w-full px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg font-bold text-gray-800"
+                              value={draft.username}
+                              onChange={(e) =>
+                                setUserDrafts({
+                                  ...userDrafts,
+                                  [u.id]: { ...draft, username: e.target.value }
+                                })
+                              }
+                            />
+                          </div>
+
+                          <div className="sm:col-span-4">
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase">
+                              Contraseña
+                            </label>
+                            <input
+                              type="text"
+                              className="w-full px-2.5 py-1.5 bg-white border border-gray-300 rounded-lg text-gray-800"
+                              value={draft.password}
+                              onChange={(e) =>
+                                setUserDrafts({
+                                  ...userDrafts,
+                                  [u.id]: { ...draft, password: e.target.value }
+                                })
+                              }
+                            />
+                          </div>
+
+                          <div className="sm:col-span-2">
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase">
+                              Rol
+                            </label>
+                            <select
+                              className="w-full px-2 py-1.5 bg-white border border-gray-300 rounded-lg font-bold"
+                              value={draft.rol}
+                              onChange={(e) =>
+                                setUserDrafts({
+                                  ...userDrafts,
+                                  [u.id]: { ...draft, rol: e.target.value }
+                                })
+                              }
+                            >
+                              <option value="DUENO">DUEÑO</option>
+                              <option value="CAJERO">CAJERO</option>
+                            </select>
+                          </div>
+
+                          <div className="sm:col-span-2 flex items-center justify-end gap-1 pt-3 sm:pt-4">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveExistingUser(u.id)}
+                              className="flex-1 sm:flex-initial bg-yape hover:bg-yape-dark text-white font-bold px-2.5 py-1.5 rounded-lg flex items-center justify-center gap-1"
+                              title="Guardar cambios de este usuario"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              <span className="sm:hidden">Guardar</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(u.id)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50"
+                              title="Eliminar usuario"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Agregar nuevo cajero/usuario */}
+                <form
+                  onSubmit={handleAddUserToNegocio}
+                  className="p-3.5 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-2.5"
+                >
+                  <div className="text-xs font-extrabold text-emerald-900 uppercase">
+                    + Agregar Cajero o Sucursal Adicional
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      required
+                      placeholder="Usuario (ej. caja2)"
+                      className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs"
+                      value={newUserForm.username}
+                      onChange={(e) => setNewUserForm({ ...newUserForm, username: e.target.value })}
+                    />
+                    <input
+                      type="text"
+                      required
+                      placeholder="Contraseña"
+                      className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs"
+                      value={newUserForm.password}
+                      onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
+                    />
+                    <select
+                      className="px-2.5 py-2 bg-white border border-gray-300 rounded-lg text-xs font-semibold"
+                      value={newUserForm.rol}
+                      onChange={(e) => setNewUserForm({ ...newUserForm, rol: e.target.value })}
+                    >
+                      <option value="CAJERO">Rol: CAJERO</option>
+                      <option value="DUENO">Rol: DUEÑO</option>
+                    </select>
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-lg transition"
+                  >
+                    Agregar Usuario
+                  </button>
+                </form>
+              </div>
+            )}
           </div>
         </div>
       )}

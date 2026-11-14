@@ -348,18 +348,24 @@ export default async function handler(req, res) {
         return res.status(200).json({ mensaje: 'Nueva API Key generada', api_key: newKey, negocio: updated });
       }
 
-      // Actualizar Webhook, WhatsApp o datos del negocio
+      // Actualizar Webhook, WhatsApp o datos completos del negocio
       if (action === 'update_settings') {
         const targetId = isSuperAdmin ? (body.negocio_id || authUser.negocio_id) : authUser.negocio_id;
         const updates = {};
         if (body.webhook_url !== undefined) updates.webhook_url = body.webhook_url.trim();
         if (body.whatsapp_alerta !== undefined) updates.whatsapp_alerta = body.whatsapp_alerta.trim();
         if (isSuperAdmin) {
-          if (body.nombre_comercial !== undefined) updates.nombre_comercial = body.nombre_comercial.trim();
+          if (body.nombre_comercial !== undefined && body.nombre_comercial.trim()) {
+            updates.nombre_comercial = body.nombre_comercial.trim();
+          }
           if (body.ruc_o_telefono !== undefined) updates.ruc_o_telefono = body.ruc_o_telefono.trim();
+          if (body.plan !== undefined) updates.plan = body.plan;
+          if (body.estado !== undefined) updates.estado = body.estado;
           if (body.precio_plan !== undefined) updates.precio_plan = parseFloat(body.precio_plan) || 0;
           if (body.notas_admin !== undefined) updates.notas_admin = body.notas_admin;
-          if (body.fecha_vencimiento !== undefined) updates.fecha_vencimiento = body.fecha_vencimiento;
+          if (body.fecha_vencimiento !== undefined && body.fecha_vencimiento) {
+            updates.fecha_vencimiento = body.fecha_vencimiento;
+          }
         }
 
         const { data: updated, error } = await supabase
@@ -370,12 +376,12 @@ export default async function handler(req, res) {
           .single();
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.status(200).json({ mensaje: 'Configuración guardada', negocio: updated });
+        return res.status(200).json({ mensaje: 'Datos del cliente actualizados', negocio: updated });
       }
 
-      // Cambiar clave o estado de un usuario (SuperAdmin o Dueño sobre sus cajeros)
+      // Cambiar usuario, clave, rol o estado de un usuario (SuperAdmin o Dueño sobre sus cajeros)
       if (action === 'update_usuario') {
-        const { usuario_id, password, activo, nombre_mostrar } = body;
+        const { usuario_id, username, password, rol, activo, nombre_mostrar } = body;
         const { data: targetUser } = await supabase
           .from('usuarios_negocio')
           .select('*')
@@ -388,7 +394,20 @@ export default async function handler(req, res) {
         }
 
         const updates = {};
-        if (password) updates.password = password;
+        if (username && username.trim() && username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
+          const { data: dup } = await supabase
+            .from('usuarios_negocio')
+            .select('id')
+            .ilike('username', username.trim())
+            .neq('id', usuario_id)
+            .maybeSingle();
+          if (dup) {
+            return res.status(409).json({ error: `El nombre de usuario "${username.trim()}" ya está ocupado.` });
+          }
+          updates.username = username.trim();
+        }
+        if (password !== undefined && password !== '') updates.password = password;
+        if (isSuperAdmin && rol) updates.rol = rol.toUpperCase();
         if (activo !== undefined) updates.activo = Boolean(activo);
         if (nombre_mostrar) updates.nombre_mostrar = nombre_mostrar.trim();
 

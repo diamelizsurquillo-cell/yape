@@ -412,32 +412,49 @@ app.all('/api/admin', verifyJwtToken, async (req, res) => {
 
                 const webhook = body.webhook_url !== undefined ? body.webhook_url.trim() : neg.webhook_url;
                 const whatsapp = body.whatsapp_alerta !== undefined ? body.whatsapp_alerta.trim() : neg.whatsapp_alerta;
-                const nombre = isSuperAdmin && body.nombre_comercial !== undefined ? body.nombre_comercial.trim() : neg.nombre_comercial;
+                const nombre = isSuperAdmin && body.nombre_comercial ? body.nombre_comercial.trim() : neg.nombre_comercial;
                 const ruc = isSuperAdmin && body.ruc_o_telefono !== undefined ? body.ruc_o_telefono.trim() : neg.ruc_o_telefono;
+                const plan = isSuperAdmin && body.plan ? body.plan : neg.plan;
+                const estado = isSuperAdmin && body.estado ? body.estado : neg.estado;
+                const fechaVenc = isSuperAdmin && body.fecha_vencimiento ? body.fecha_vencimiento : neg.fecha_vencimiento;
                 const precio = isSuperAdmin && body.precio_plan !== undefined ? parseFloat(body.precio_plan) || 0 : neg.precio_plan;
                 const notas = isSuperAdmin && body.notas_admin !== undefined ? body.notas_admin : neg.notas_admin;
 
                 await db.run(
-                    `UPDATE negocios SET webhook_url = ?, whatsapp_alerta = ?, nombre_comercial = ?, ruc_o_telefono = ?, precio_plan = ?, notas_admin = ? WHERE id = ?`,
-                    [webhook, whatsapp, nombre, ruc, precio, notas, targetId]
+                    `UPDATE negocios SET webhook_url = ?, whatsapp_alerta = ?, nombre_comercial = ?, ruc_o_telefono = ?, plan = ?, estado = ?, fecha_vencimiento = ?, precio_plan = ?, notas_admin = ? WHERE id = ?`,
+                    [webhook, whatsapp, nombre, ruc, plan, estado, fechaVenc, precio, notas, targetId]
                 );
 
                 const updated = await db.get('SELECT * FROM negocios WHERE id = ?', [targetId]);
-                return res.json({ mensaje: 'Configuración guardada', negocio: updated });
+                return res.json({ mensaje: 'Datos del cliente actualizados', negocio: updated });
             }
 
             if (action === 'update_usuario') {
-                const { usuario_id, password, activo, nombre_mostrar } = body;
+                const { usuario_id, username, password, rol, activo, nombre_mostrar } = body;
                 const targetUser = await db.get('SELECT * FROM usuarios_negocio WHERE id = ?', [usuario_id]);
                 if (!targetUser) return res.status(404).json({ error: 'Usuario no encontrado' });
                 if (!isSuperAdmin && targetUser.negocio_id !== req.user.negocio_id) {
                     return res.status(403).json({ error: 'No autorizado' });
                 }
 
+                let finalUsername = targetUser.username;
+                if (username && username.trim() && username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
+                    const dup = await db.get(
+                        'SELECT id FROM usuarios_negocio WHERE LOWER(username) = LOWER(?) AND id != ?',
+                        [username.trim(), usuario_id]
+                    );
+                    if (dup) {
+                        return res.status(409).json({ error: `El nombre de usuario "${username.trim()}" ya está ocupado.` });
+                    }
+                    finalUsername = username.trim();
+                }
+
                 await db.run(
-                    `UPDATE usuarios_negocio SET password = ?, activo = ?, nombre_mostrar = ? WHERE id = ?`,
+                    `UPDATE usuarios_negocio SET username = ?, password = ?, rol = ?, activo = ?, nombre_mostrar = ? WHERE id = ?`,
                     [
-                        password || targetUser.password,
+                        finalUsername,
+                        password !== undefined && password !== '' ? password : targetUser.password,
+                        isSuperAdmin && rol ? rol.toUpperCase() : targetUser.rol,
                         activo !== undefined ? (activo ? 1 : 0) : targetUser.activo,
                         nombre_mostrar ? nombre_mostrar.trim() : targetUser.nombre_mostrar,
                         usuario_id
