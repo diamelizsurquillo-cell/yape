@@ -731,7 +731,7 @@ function App() {
                     : 'bg-yape-dark text-white border-white/20'
                 }`}
               >
-                {currentUser?.rol || 'ADMIN'}
+                {currentUser?.rol === 'DUENO' ? 'DUEÑO' : currentUser?.rol || 'ADMIN'}
               </span>
               {/* Indicador automático de tipo de monitor detectado */}
               <span

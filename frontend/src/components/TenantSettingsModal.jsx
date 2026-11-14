@@ -238,7 +238,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
                             : 'bg-emerald-100 text-emerald-800'
                         }`}
                       >
-                        {u.rol}
+                        {u.rol === 'DUENO' ? 'DUEÑO' : u.rol}
                       </span>
                       <strong className="text-gray-800">{u.username}</strong>
                       <span className="text-gray-400 ml-2">Clave: {u.password}</span>
