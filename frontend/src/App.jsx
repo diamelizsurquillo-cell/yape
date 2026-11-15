@@ -982,6 +982,35 @@ function App() {
         </div>
       )}
 
+      {/* Aviso grande de 1 toque para que el Cajero/Dueño active alertas con App Cerrada */}
+      {!isSuperAdmin && webPush.supported && !webPush.subscribed && (
+        <div className="bg-amber-50 border-b border-amber-200 px-3 sm:px-6 py-2.5">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-start sm:items-center gap-2 text-xs text-amber-900">
+              <BellOff className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5 sm:mt-0" />
+              <div>
+                <strong>Falta activar las Alertas con App Cerrada en este equipo:</strong>{' '}
+                <span>
+                  Toca el botón una sola vez para que tu celular suene y vibre aunque cierres la App o apagues la pantalla.
+                </span>
+                {webPush.statusMsg && (
+                  <span className="block font-bold text-red-700 mt-0.5">{webPush.statusMsg}</span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={webPush.busy}
+              onClick={() => webPush.enablePush()}
+              className="bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-white font-extrabold text-xs px-4 py-2 rounded-xl shadow-sm flex items-center justify-center gap-1.5 flex-shrink-0 transition"
+            >
+              <BellRing className="w-4 h-4" />
+              <span>{webPush.busy ? 'Activando...' : 'Activar Alertas con App Cerrada'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* CUERPO PRINCIPAL ADAPTABLE */}
       <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 sm:mt-6">
         {isSuperAdmin && activeTab === 'clientes' ? (
@@ -1697,10 +1726,10 @@ function App() {
                     <button
                       type="button"
                       disabled={webPush.busy}
-                      onClick={webPush.sendTestPush}
-                      className="w-full py-1.5 px-3 bg-white hover:bg-emerald-100/70 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition"
+                      onClick={() => webPush.sendTestPush(4500)}
+                      className="w-full py-2 px-3 bg-white hover:bg-emerald-100/70 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition"
                     >
-                      📲 Enviar Prueba Push (Toca y bloquea tu pantalla)
+                      📲 Probar con App Cerrada (Toca y bloquea tu pantalla en 4 seg)
                     </button>
                   )}
 

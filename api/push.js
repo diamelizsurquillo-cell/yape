@@ -25,10 +25,13 @@ export default async function handler(req, res) {
 
   const { publicKey } = getVapidKeys();
 
-  // 1. GET: Obtener llave pública VAPID y cantidad de dispositivos suscritos
+  // 1. GET: Obtener llave pública VAPID y verificar si el endpoint actual ya está guardado en BD
   if (req.method === 'GET') {
     const { supabase } = getSupabaseClient();
+    const checkEndpoint = String(req.query?.endpoint || '').trim();
     let count = 0;
+    let endpointRegistered = false;
+
     if (supabase && authUser.negocio_id) {
       const { data: neg } = await supabase
         .from('negocios')
@@ -36,12 +39,17 @@ export default async function handler(req, res) {
         .eq('id', authUser.negocio_id)
         .maybeSingle();
       if (neg) {
-        count = extractPushSubscriptions(neg).length;
+        const subs = extractPushSubscriptions(neg);
+        count = subs.length;
+        if (checkEndpoint) {
+          endpointRegistered = subs.some((s) => s.endpoint === checkEndpoint);
+        }
       }
     }
     return res.status(200).json({
       publicKey,
-      subscribedDevices: count
+      subscribedDevices: count,
+      endpointRegistered
     });
   }
 
@@ -80,7 +88,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // 2. POST: Registrar suscripción Push del Celular/PC o enviar alerta de prueba
+  // 2. POST: Registrar suscripción Push del Celular/PC o enviar alerta de prueba (con retardo opcional)
   if (req.method === 'POST') {
     const action = req.body?.action || 'subscribe';
 
@@ -88,9 +96,15 @@ export default async function handler(req, res) {
       const subs = extractPushSubscriptions(negocio);
       if (subs.length === 0) {
         return res.status(400).json({
-          error: 'Primero activa las alertas Push en este dispositivo.'
+          error: 'Este equipo aún no figura suscrito en el servidor. Toca "Activar Alertas" primero.'
         });
       }
+
+      const delayMs = Math.max(0, Math.min(6000, parseInt(req.body?.delay_ms || '0', 10) || 0));
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
       const result = await dispatchWebPushToSubs(subs, {
         title: '💸 PRUEBA YAPE S/ 25.00',
         body: `De: Cliente de Prueba • Cód: 842 (${negocio.nombre_comercial})`,
@@ -105,9 +119,12 @@ export default async function handler(req, res) {
         await savePushSubscriptionsInSupabase(supabase, negocio, result.validSubs);
       }
       return res.status(200).json({
-        ok: true,
+        ok: result.sentCount > 0,
         sent: result.sentCount,
-        mensaje: `Notificación enviada a ${result.sentCount} dispositivo(s). ¡Bloquea tu pantalla para verla!`
+        mensaje:
+          result.sentCount > 0
+            ? `¡Alerta Push enviada a ${result.sentCount} equipo(s)!`
+            : 'El navegador rechazó el token anterior. Toca "Reactivar Alertas" para renovarlo.'
       });
     }
 
@@ -130,13 +147,24 @@ export default async function handler(req, res) {
 
     const saved = await savePushSubscriptionsInSupabase(supabase, negocio, currentSubs);
     if (!saved.ok) {
-      return res.status(500).json({ error: 'No se pudo guardar la suscripción Push' });
+      return res.status(500).json({
+        error: `No se pudo guardar la suscripción Push en Supabase: ${saved.error?.message || 'verifica permisos RLS'}`
+      });
     }
+
+    // Enviar confirmación Push inmediata al celular para comprobar sonido + vibración
+    await dispatchWebPushToSubs([check.subscription], {
+      title: '🔔 ¡Alertas Activadas con Éxito!',
+      body: `${negocio.nombre_comercial}: Ya recibirás aviso de cada pago aunque cierres la App.`,
+      tag: `yape-welcome-${Date.now()}`,
+      url: '/'
+    }).catch(() => {});
 
     return res.status(201).json({
       ok: true,
+      endpointRegistered: true,
       subscribedDevices: Math.min(15, currentSubs.length),
-      mensaje: 'Alertas con App Cerrada activadas en este dispositivo.'
+      mensaje: '¡Alertas con App Cerrada activadas y verificadas!'
     });
   }
 

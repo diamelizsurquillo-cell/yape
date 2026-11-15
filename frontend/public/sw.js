@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yape-monitor-shell-v2';
+const CACHE_NAME = 'yape-monitor-shell-v3';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -32,7 +32,6 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // SEGURIDAD: Jamás almacenar en caché endpoints /api/*, sockets ni orígenes externos
   if (
     url.origin !== self.location.origin ||
     url.pathname.startsWith('/api/') ||
@@ -76,24 +75,33 @@ self.addEventListener('push', (event) => {
     }
   }
 
-  const options = {
+  const richOptions = {
     body: data.body,
     icon: '/pwa-192x192.png',
     badge: '/pwa-192x192.png',
     tag: data.tag || `yape-push-${Date.now()}`,
     renotify: true,
+    silent: false,
     requireInteraction: true,
-    vibrate: [250, 120, 250, 120, 400],
+    vibrate: [300, 120, 300, 120, 500],
     data: {
       url: data.url || '/',
       pagoId: data.id || null
-    },
-    actions: [
-      { action: 'open', title: 'Ver y Validar Pago' }
-    ]
+    }
   };
 
-  event.waitUntil(self.registration.showNotification(data.title, options));
+  const showPromise = self.registration
+    .showNotification(data.title, richOptions)
+    .catch(() =>
+      // Fallback universal para Safari iOS o navegadores con opciones restringidas
+      self.registration.showNotification(data.title, {
+        body: data.body,
+        icon: '/pwa-192x192.png',
+        data: { url: data.url || '/' }
+      })
+    );
+
+  event.waitUntil(showPromise);
 });
 
 self.addEventListener('notificationclick', (event) => {
