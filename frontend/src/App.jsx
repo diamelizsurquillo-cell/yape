@@ -191,6 +191,38 @@ function App() {
     };
   }, [token, superAdminTenantFilter]);
 
+  // Puente de audio desde Service Worker: si la PWA está minimizada en segundo plano, intenta cantar el pago apenas llega el Push
+  useEffect(() => {
+    if (!token || !('serviceWorker' in navigator)) return;
+    const onSwMessage = (event) => {
+      const msg = event.data;
+      if (msg?.type === 'PUSH_PAYMENT_ALERT' && msg.payload?.monto) {
+        const p = msg.payload;
+        if (p.id) {
+          handleIncomingPayment({
+            id: p.id,
+            monto: p.monto,
+            remitente: p.remitente || 'Cliente',
+            codigo_seguridad: p.codigo_seguridad || '',
+            banco: p.banco || 'YAPE',
+            timestamp: Math.floor(Date.now() / 1000),
+            validado: 0,
+            negocio_id: currentUser?.negocio_id || null
+          });
+        } else {
+          speakPayment({
+            monto: p.monto,
+            remitente: p.remitente || 'Cliente',
+            banco: p.banco || 'YAPE',
+            ...soundSettingsRef.current
+          });
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onSwMessage);
+  }, [token, currentUser?.negocio_id]);
+
   // SEC-01: Sincronización autenticada por JWT en segundo plano.
   // Garantiza alertas de voz, PiP y bloqueo inmediato por suspensión incluso con RLS estricto activado en Supabase.
   useEffect(() => {

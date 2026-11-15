@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yape-monitor-shell-v3';
+const CACHE_NAME = 'yape-monitor-shell-v4';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -90,6 +90,15 @@ self.addEventListener('push', (event) => {
     }
   };
 
+  const notifyClientsPromise = self.clients
+    .matchAll({ type: 'window', includeUncontrolled: true })
+    .then((windowClients) => {
+      windowClients.forEach((client) => {
+        client.postMessage({ type: 'PUSH_PAYMENT_ALERT', payload: data });
+      });
+    })
+    .catch(() => {});
+
   const showPromise = self.registration
     .showNotification(data.title, richOptions)
     .catch(() =>
@@ -101,7 +110,7 @@ self.addEventListener('push', (event) => {
       })
     );
 
-  event.waitUntil(showPromise);
+  event.waitUntil(Promise.all([showPromise, notifyClientsPromise]));
 });
 
 self.addEventListener('notificationclick', (event) => {
