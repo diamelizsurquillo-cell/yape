@@ -614,15 +614,6 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const shareOnWhatsApp = (pago) => {
-    const phone = (currentUser?.whatsapp_alerta || '').replace(/[^0-9]/g, '');
-    const texto = `✅ *PAGO CONFIRMADO (${pago.banco || 'YAPE'})*\n• Monto: *S/ ${Number(pago.monto).toFixed(2)}*\n• Cliente: ${pago.remitente}\n• Cód. Seguridad: ${pago.codigo_seguridad || '-'}\n• Hora: ${formatFecha(pago.timestamp)}`;
-    const waUrl = phone
-      ? `https://wa.me/${phone}?text=${encodeURIComponent(texto)}`
-      : `https://wa.me/?text=${encodeURIComponent(texto)}`;
-    window.open(waUrl, '_blank', 'noopener,noreferrer');
-  };
-
   const getSubscriptionRemainingDays = () => {
     if (!currentUser?.fecha_vencimiento) return null;
     return Math.ceil((new Date(currentUser.fecha_vencimiento).getTime() - Date.now()) / 86400000);
@@ -862,7 +853,7 @@ function App() {
                 <button
                   onClick={() => setShowTenantModal(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm bg-white text-yape hover:bg-purple-50 border-white"
-                  title="Configurar Cajeros, API Key, Webhook y WhatsApp"
+                  title="Configurar Cajeros, Sensor y Webhook"
                 >
                   <Users className="w-4 h-4" />
                   <span className="hidden md:inline">Mi Negocio / Cajeros</span>
@@ -1383,14 +1374,6 @@ function App() {
                           </span>
                         )}
 
-                        <button
-                          onClick={() => shareOnWhatsApp(p)}
-                          className="bg-emerald-50 active:bg-emerald-100 text-emerald-700 font-bold text-xs py-2.5 px-3 rounded-xl border border-emerald-200 flex items-center gap-1"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>WhatsApp</span>
-                        </button>
-
                         {!isCajero && (
                           <button
                             onClick={(e) => deleteSinglePayment(p.id, e)}
@@ -1497,15 +1480,6 @@ function App() {
                                     Por: {p.usuario_validador || 'caja'}
                                   </span>
                                 )}
-
-                                <button
-                                  onClick={() => shareOnWhatsApp(p)}
-                                  className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 transition flex items-center gap-1"
-                                  title="Enviar comprobante verificado por WhatsApp"
-                                >
-                                  <ExternalLink className="w-3.5 h-3.5" />
-                                  <span className="hidden xl:inline">WhatsApp</span>
-                                </button>
 
                                 {!isCajero && (
                                   <button

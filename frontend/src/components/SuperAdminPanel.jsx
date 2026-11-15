@@ -849,21 +849,13 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 pt-1">
+                <div className="pt-1">
                   <button
                     onClick={() => openEditClientModal(neg, 'datos')}
-                    className="bg-yape active:bg-yape-dark text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm"
+                    className="w-full bg-yape active:bg-yape-dark text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm"
                   >
                     <Edit3 className="w-4 h-4" />
                     <span>Editar Cliente</span>
-                  </button>
-
-                  <button
-                    onClick={() => copyText(buildWelcomeWhatsAppText(neg), `wa-${neg.id}`)}
-                    className="bg-emerald-600 active:bg-emerald-700 text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm"
-                  >
-                    {copiedId === `wa-${neg.id}` ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                    <span>{copiedId === `wa-${neg.id}` ? '¡Copiado!' : 'Kit WhatsApp'}</span>
                   </button>
                 </div>
 
@@ -1017,15 +1009,6 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                             <span>Editar</span>
-                          </button>
-
-                          <button
-                            onClick={() => copyText(buildWelcomeWhatsAppText(neg), `wa-${neg.id}`)}
-                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-2.5 py-1.5 rounded-lg flex items-center gap-1 shadow-sm transition"
-                            title="Copiar mensaje completo de bienvenida para WhatsApp"
-                          >
-                            {copiedId === `wa-${neg.id}` ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                            <span>{copiedId === `wa-${neg.id}` ? '¡Copiado!' : 'WhatsApp'}</span>
                           </button>
 
                           <button
@@ -1406,34 +1389,17 @@ export default function SuperAdminPanel({ token, apiUrl, onSelectTenantFilter })
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
-                        WhatsApp de Alertas / Delivery
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Ej: 51999888777"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
-                        value={editForm.whatsapp_alerta}
-                        onChange={(e) =>
-                          setEditForm({ ...editForm, whatsapp_alerta: e.target.value })
-                        }
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
-                        Webhook URL (WooCommerce / POS)
-                      </label>
-                      <input
-                        type="url"
-                        placeholder="https://mitienda.pe/api/webhook"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
-                        value={editForm.webhook_url}
-                        onChange={(e) => setEditForm({ ...editForm, webhook_url: e.target.value })}
-                      />
-                    </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 uppercase mb-1">
+                      Webhook URL (WooCommerce / POS)
+                    </label>
+                    <input
+                      type="url"
+                      placeholder="https://mitienda.pe/api/webhook"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
+                      value={editForm.webhook_url}
+                      onChange={(e) => setEditForm({ ...editForm, webhook_url: e.target.value })}
+                    />
                   </div>
 
                   <div>

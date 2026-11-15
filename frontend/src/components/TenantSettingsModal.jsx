@@ -555,7 +555,7 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
 
           <form onSubmit={handleSaveIntegrations} className="p-3.5 sm:p-4 bg-gray-50 border border-gray-200 rounded-xl space-y-3">
             <div className="text-xs font-extrabold text-gray-800 uppercase flex items-center gap-1.5">
-              <ExternalLink className="w-4 h-4 text-blue-600" /> 3. Integración WooCommerce / Facturador & WhatsApp Delivery
+              <ExternalLink className="w-4 h-4 text-blue-600" /> 3. Integración WooCommerce / Facturador (Webhook)
             </div>
 
             <div>
@@ -571,25 +571,12 @@ export default function TenantSettingsModal({ token, apiUrl, user, onClose, onPr
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-600 mb-1">
-                Número WhatsApp de Repartidor / Cocina (ej: 51999888777)
-              </label>
-              <input
-                type="text"
-                placeholder="51999888777"
-                className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-xs"
-                value={whatsappAlerta}
-                onChange={(e) => setWhatsappAlerta(e.target.value)}
-              />
-            </div>
-
             <div className="flex justify-end">
               <button
                 type="submit"
                 className="w-full sm:w-auto bg-gray-900 hover:bg-black text-white font-bold text-xs px-4 py-2.5 rounded-lg transition"
               >
-                Guardar Integraciones
+                Guardar Webhook
               </button>
             </div>
           </form>
