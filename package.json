@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
+    "web-push": "^4.0.0",
     "ws": "^8.21.3"
   }
 }

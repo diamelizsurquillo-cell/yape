@@ -84,7 +84,8 @@ async function getDatabaseConnection() {
         'ALTER TABLE negocios ADD COLUMN pairing_expires_at TEXT;',
         'ALTER TABLE negocios ADD COLUMN sensor_last_seen TEXT;',
         'ALTER TABLE negocios ADD COLUMN sensor_battery INTEGER;',
-        "ALTER TABLE negocios ADD COLUMN sensor_device_name TEXT DEFAULT '';"
+        "ALTER TABLE negocios ADD COLUMN sensor_device_name TEXT DEFAULT '';",
+        "ALTER TABLE negocios ADD COLUMN push_subscriptions TEXT DEFAULT '[]';"
     ];
     for (const stmt of alterStatements) {
         try {

@@ -5,7 +5,7 @@ import {
   Coins, Filter, RefreshCw,
   ShieldAlert, Check, Trash2,
   Volume2, VolumeX, Settings, Play, X,
-  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink, Smartphone, Download
+  BellRing, BellOff, AppWindow, Building2, Users, ExternalLink, Smartphone, Download, Sun
 } from 'lucide-react';
 import { speakPayment, playChime } from './utils/soundAlert';
 import { supabase, isSupabaseConfigured } from './utils/supabaseClient';
@@ -13,6 +13,8 @@ import { requestNotificationPermission, showDesktopNotification } from './utils/
 import { openYapeFloatingWidget, updateFloatingWidget, isPipSupported } from './utils/pipWidget';
 import { useDeviceViewport } from './utils/useDeviceViewport';
 import { usePwaInstall } from './utils/usePwaInstall';
+import { useWebPush } from './utils/useWebPush';
+import { useScreenWakeLock } from './utils/useScreenWakeLock';
 import SuperAdminPanel from './components/SuperAdminPanel';
 import TenantSettingsModal from './components/TenantSettingsModal';
 import PwaInstallModal from './components/PwaInstallModal';
@@ -38,9 +40,15 @@ function loadInitialSession() {
 function App() {
   const viewport = useDeviceViewport();
   const pwa = usePwaInstall();
+  const wakeLock = useScreenWakeLock();
   const initialSession = loadInitialSession();
   const [token, setToken] = useState(initialSession.token);
   const [currentUser, setCurrentUser] = useState(initialSession.user);
+  const webPush = useWebPush({
+    token,
+    apiUrl: API_URL,
+    enabledForRole: Boolean(currentUser?.negocio_id)
+  });
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -847,28 +855,52 @@ function App() {
                 <span className="hidden lg:inline">{soundEnabled ? 'Voz: ON' : 'Voz: OFF'}</span>
               </button>
 
-              {/* Alertas Escritorio (Tablet / PC) */}
-              {!viewport.isMobile && (
+              {/* Alertas Push con App Cerrada (Celular / Tablet / PC) */}
+              {!isSuperAdmin && webPush.supported && (
                 <button
+                  disabled={webPush.busy}
                   onClick={async () => {
-                    const perm = await requestNotificationPermission();
-                    setDesktopNotifications(perm === 'granted');
-                    if (perm === 'granted') {
-                      showDesktopNotification({
-                        monto: 50,
-                        remitente: 'Cliente de Prueba',
-                        codigo_seguridad: '999'
-                      });
+                    if (webPush.subscribed) {
+                      setShowSoundModal(true);
+                    } else {
+                      await webPush.enablePush();
                     }
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
-                    desktopNotifications
-                      ? 'bg-purple-900/60 hover:bg-purple-900 text-white border-purple-400'
-                      : 'bg-amber-500/90 hover:bg-amber-600 text-white border-amber-300'
+                    webPush.subscribed
+                      ? 'bg-emerald-600/90 hover:bg-emerald-700 text-white border-emerald-300'
+                      : 'bg-amber-500/95 hover:bg-amber-600 text-white border-amber-300'
                   }`}
-                  title="Activar alertas emergentes de escritorio"
+                  title={
+                    webPush.subscribed
+                      ? 'Alertas con App Cerrada ACTIVAS (Toca para probar o configurar)'
+                      : 'Activar Notificación Push aunque la App esté cerrada o bloqueada'
+                  }
                 >
-                  {desktopNotifications ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                  {webPush.subscribed ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                  <span className="hidden xl:inline">
+                    {webPush.subscribed ? 'Push ON' : 'Activar Push'}
+                  </span>
+                </button>
+              )}
+
+              {/* Modo Mostrador: Pantalla Siempre Activa para que nunca se corte la voz */}
+              {!isSuperAdmin && wakeLock.isSupported && (
+                <button
+                  onClick={() => wakeLock.toggleWakeLock()}
+                  className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold transition border shadow-sm ${
+                    wakeLock.wanted
+                      ? 'bg-yellow-400 text-gray-900 border-yellow-200'
+                      : 'bg-white/15 hover:bg-white/25 text-white border-white/25'
+                  }`}
+                  title={
+                    wakeLock.wanted
+                      ? 'Modo Mostrador ACTIVO: la pantalla no se apagará para cantar siempre en voz alta'
+                      : 'Activar Modo Mostrador (evita que la pantalla se apague en turno)'
+                  }
+                >
+                  <Sun className="w-4 h-4" />
+                  <span className="hidden xl:inline">Mostrador</span>
                 </button>
               )}
 
@@ -1620,6 +1652,94 @@ function App() {
                 <Play className="w-4 h-4 fill-white" />
                 <span>Probar Voz Yape (S/ 50.00)</span>
               </button>
+
+              {/* 1. Notificaciones Push con App Cerrada (Web Push VAPID) */}
+              {!isSuperAdmin && (
+                <div className="p-3.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <span className="font-bold text-gray-900 flex items-center gap-1.5 text-xs sm:text-sm">
+                        <BellRing className="w-4 h-4 text-emerald-700" />
+                        <span>1. Alerta con App Cerrada (Push)</span>
+                      </span>
+                      <span className="text-[11px] text-gray-600 block mt-0.5">
+                        Recibe timbre, vibración, monto y código en la pantalla bloqueada aunque cierres la App.
+                      </span>
+                    </div>
+                    {webPush.supported ? (
+                      webPush.subscribed ? (
+                        <button
+                          type="button"
+                          disabled={webPush.busy}
+                          onClick={webPush.disablePush}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs px-3 py-1.5 rounded-lg flex-shrink-0"
+                        >
+                          ✔ Activo
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={webPush.busy}
+                          onClick={webPush.enablePush}
+                          className="bg-amber-500 hover:bg-amber-600 text-white font-extrabold text-xs px-3 py-1.5 rounded-lg flex-shrink-0 shadow-sm"
+                        >
+                          {webPush.busy ? 'Activando...' : 'Activar'}
+                        </button>
+                      )
+                    ) : (
+                      <span className="text-[11px] font-bold text-gray-400">
+                        Instala la PWA primero
+                      </span>
+                    )}
+                  </div>
+
+                  {webPush.subscribed && (
+                    <button
+                      type="button"
+                      disabled={webPush.busy}
+                      onClick={webPush.sendTestPush}
+                      className="w-full py-1.5 px-3 bg-white hover:bg-emerald-100/70 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition"
+                    >
+                      📲 Enviar Prueba Push (Toca y bloquea tu pantalla)
+                    </button>
+                  )}
+
+                  {webPush.statusMsg && (
+                    <p className="text-[11px] font-bold text-emerald-800">{webPush.statusMsg}</p>
+                  )}
+                </div>
+              )}
+
+              {/* 2. Modo Mostrador: Pantalla Siempre Encendida (Wake Lock) */}
+              {!isSuperAdmin && wakeLock.isSupported && (
+                <div className="flex items-center justify-between p-3.5 bg-amber-50/70 rounded-xl border border-amber-200 gap-3">
+                  <div className="min-w-0">
+                    <span className="font-bold text-gray-900 flex items-center gap-1.5 text-xs sm:text-sm">
+                      <Sun className="w-4 h-4 text-amber-600" />
+                      <span>2. Modo Mostrador (No apagar pantalla)</span>
+                    </span>
+                    <span className="text-[11px] text-gray-600 block mt-0.5">
+                      Evita que el celular o tablet se bloquee en turno para que siempre cante en voz alta.
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={wakeLock.wanted}
+                    onChange={() => wakeLock.toggleWakeLock()}
+                    className="w-5 h-5 accent-amber-500 cursor-pointer flex-shrink-0"
+                  />
+                </div>
+              )}
+
+              {/* 3. Nota Modo Parlante de Bolsillo en APK Android */}
+              {!isSuperAdmin && (
+                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 text-[11px] text-gray-600">
+                  <strong className="text-gray-800 block mb-0.5">
+                    🔊 ¿Quieres que hable en voz alta con la pantalla apagada en el bolsillo?
+                  </strong>
+                  En celulares Android puedes abrir la app nativa <strong>Yape Sensor APK</strong>, elegir la pestaña <strong>&quot;Modo Parlante Caja&quot;</strong> e ingresar tu usuario y clave de Cajero o Dueño.
+                </div>
+              )}
 
               {/* Sección Opcional de Aplicación Web Instalable (PWA) */}
               <div className="p-3.5 bg-purple-50/70 rounded-xl border border-purple-200 flex items-center justify-between gap-3">

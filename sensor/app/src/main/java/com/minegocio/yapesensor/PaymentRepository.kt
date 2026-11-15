@@ -35,6 +35,22 @@ class PaymentRepository(private val context: Context) {
         val errorMessage: String = ""
     )
 
+    data class SpeakerLoginResult(
+        val success: Boolean,
+        val businessName: String = "",
+        val role: String = "",
+        val errorMessage: String = ""
+    )
+
+    data class RemotePaymentItem(
+        val id: Long,
+        val banco: String,
+        val monto: Double,
+        val remitente: String,
+        val codigoSeguridad: String?,
+        val timestampSec: Long
+    )
+
     /**
      * Arquitectura Write-Ahead Queue (Cero Pagos Perdidos y Cero Duplicados):
      * 1. Genera event_uid determinístico.
@@ -275,5 +291,123 @@ class PaymentRepository(private val context: Context) {
             ExistingWorkPolicy.REPLACE,
             uploadRequest
         )
+    }
+
+    /**
+     * Inicia sesión como Cajero o Dueño para usar el celular en MODO PARLANTE DE CAJA
+     * (habla en voz alta incluso con la pantalla apagada en el bolsillo).
+     */
+    suspend fun loginCashierSpeaker(
+        serverUrlInput: String,
+        usernameInput: String,
+        passwordInput: String
+    ): SpeakerLoginResult {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = NetworkClient.normalizeBaseUrl(serverUrlInput.ifBlank { PreferencesManager.DEFAULT_CLOUD_URL })
+            val cleanUser = usernameInput.trim()
+            if (cleanUser.isEmpty() || passwordInput.isEmpty()) {
+                return@withContext SpeakerLoginResult(false, errorMessage = "Ingresa tu usuario y contraseña de Caja.")
+            }
+
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val bodyJson = JsonObject().apply {
+                addProperty("username", cleanUser)
+                addProperty("password", passwordInput)
+            }
+
+            try {
+                val req = Request.Builder()
+                    .url("$baseUrl/api/auth/login")
+                    .post(bodyJson.toString().toRequestBody(mediaType))
+                    .build()
+
+                NetworkClient.httpClient.newCall(req).execute().use { res ->
+                    val raw = res.body?.string() ?: "{}"
+                    val json = try {
+                        JsonParser.parseString(raw).asJsonObject
+                    } catch (_: Exception) {
+                        JsonObject()
+                    }
+
+                    if (!res.isSuccessful) {
+                        val err = json.get("error")?.asString ?: "Credenciales inválidas (HTTP ${res.code})"
+                        return@withContext SpeakerLoginResult(false, errorMessage = err)
+                    }
+
+                    val token = json.get("token")?.asString ?: ""
+                    val userObj = json.getAsJsonObject("user")
+                    val businessName = userObj?.get("nombre_comercial")?.asString ?: "Mi Negocio"
+                    val role = userObj?.get("rol")?.asString ?: "CAJERO"
+
+                    prefs.saveSpeakerSession(
+                        url = baseUrl,
+                        token = token,
+                        username = cleanUser,
+                        passwordRaw = passwordInput,
+                        businessName = businessName
+                    )
+                    DiagnosticLogger.log("🔊 Modo Parlante conectado a '$businessName' ($cleanUser)")
+                    SpeakerLoginResult(true, businessName = businessName, role = role)
+                }
+            } catch (e: Exception) {
+                SpeakerLoginResult(false, errorMessage = "Error de conexión: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Consulta ligera HTTP/2 cada 3.5s para detectar pagos entrantes y cantarlos con pantalla apagada.
+     */
+    suspend fun pollRecentPaymentsForSpeaker(): List<RemotePaymentItem> {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = NetworkClient.normalizeBaseUrl(prefs.getBackendUrl())
+            var token = prefs.getSpeakerToken()
+            if (baseUrl.isEmpty() || token.isEmpty()) return@withContext emptyList()
+
+            try {
+                val req = Request.Builder()
+                    .url("$baseUrl/api/pagos?limit=10")
+                    .addHeader("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+
+                NetworkClient.httpClient.newCall(req).execute().use { res ->
+                    if (res.code == 401 || res.code == 403) {
+                        val savedUser = prefs.getSpeakerUsername()
+                        val savedPass = prefs.getSpeakerPassword()
+                        if (savedUser.isNotBlank() && savedPass.isNotBlank()) {
+                            val relogin = loginCashierSpeaker(baseUrl, savedUser, savedPass)
+                            if (relogin.success) {
+                                token = prefs.getSpeakerToken()
+                            }
+                        }
+                        return@withContext emptyList()
+                    }
+
+                    if (!res.isSuccessful) return@withContext emptyList()
+                    val raw = res.body?.string() ?: "[]"
+                    val arr = JsonParser.parseString(raw).asJsonArray
+                    val out = mutableListOf<RemotePaymentItem>()
+                    for (elem in arr) {
+                        if (!elem.isJsonObject) continue
+                        val obj = elem.asJsonObject
+                        val id = obj.get("id")?.asLong ?: continue
+                        val banco = obj.get("banco")?.asString ?: "YAPE"
+                        val monto = obj.get("monto")?.asDouble ?: 0.0
+                        val remitente = obj.get("remitente")?.asString ?: "Cliente"
+                        val cod = if (obj.has("codigo_seguridad") && !obj.get("codigo_seguridad").isJsonNull) {
+                            obj.get("codigo_seguridad").asString
+                        } else {
+                            null
+                        }
+                        val ts = obj.get("timestamp")?.asLong ?: 0L
+                        out.add(RemotePaymentItem(id, banco, monto, remitente, cod, ts))
+                    }
+                    out.sortedBy { it.id }
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
     }
 }

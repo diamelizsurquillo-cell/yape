@@ -827,6 +827,145 @@ app.get('/api/pair', verifyJwtToken, async (req, res) => {
 });
 
 // ==========================================
+// 2C. NOTIFICACIONES WEB PUSH CON APP CERRADA (/api/push)
+// ==========================================
+let cachedLocalVapid = null;
+function getLocalVapidKeys() {
+    if (cachedLocalVapid) return cachedLocalVapid;
+    if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+        cachedLocalVapid = {
+            publicKey: process.env.VAPID_PUBLIC_KEY.trim(),
+            privateKey: process.env.VAPID_PRIVATE_KEY.trim()
+        };
+        return cachedLocalVapid;
+    }
+    const seed = crypto.createHmac('sha256', JWT_SECRET).update('yape-saas-webpush-vapid-p256-v1').digest();
+    const privBuf = Buffer.from(seed);
+    privBuf[0] = (privBuf[0] & 0x7f) | 0x01;
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.setPrivateKey(privBuf);
+    const pubBuf = ecdh.getPublicKey();
+    cachedLocalVapid = {
+        publicKey: pubBuf.toString('base64url'),
+        privateKey: privBuf.toString('base64url')
+    };
+    return cachedLocalVapid;
+}
+
+function parseLocalPushSubs(neg) {
+    if (!neg || !neg.push_subscriptions) return [];
+    try {
+        const arr = JSON.parse(neg.push_subscriptions);
+        return Array.isArray(arr) ? arr : [];
+    } catch {
+        return [];
+    }
+}
+
+async function sendLocalWebPushForNegocio(db, neg, payloadObj) {
+    const subs = parseLocalPushSubs(neg);
+    if (subs.length === 0) return 0;
+    const webpush = await import('web-push');
+    const { publicKey, privateKey } = getLocalVapidKeys();
+    webpush.setVapidDetails('mailto:soporte@yape-monitor.pe', publicKey, privateKey);
+    const bodyStr = JSON.stringify(payloadObj);
+    const valid = [];
+    let sent = 0;
+    let pruned = false;
+    await Promise.all(
+        subs.map(async (item) => {
+            try {
+                await webpush.sendNotification(
+                    { endpoint: item.endpoint, keys: item.keys },
+                    bodyStr,
+                    { TTL: 180, urgency: 'high' }
+                );
+                sent++;
+                valid.push(item);
+            } catch (err) {
+                if (err?.statusCode === 404 || err?.statusCode === 410) {
+                    pruned = true;
+                } else {
+                    valid.push(item);
+                }
+            }
+        })
+    );
+    if (pruned) {
+        await db.run('UPDATE negocios SET push_subscriptions = ? WHERE id = ?', [JSON.stringify(valid), neg.id]);
+    }
+    return sent;
+}
+
+app.get('/api/push', verifyJwtToken, async (req, res) => {
+    const { publicKey } = getLocalVapidKeys();
+    let count = 0;
+    if (req.user.negocio_id) {
+        const db = await getDatabaseConnection();
+        const neg = await db.get('SELECT push_subscriptions FROM negocios WHERE id = ?', [req.user.negocio_id]);
+        count = parseLocalPushSubs(neg).length;
+    }
+    return res.json({ publicKey, subscribedDevices: count });
+});
+
+app.post('/api/push', verifyJwtToken, async (req, res) => {
+    const targetId = req.user.rol === 'SUPERADMIN' ? (req.body?.negocio_id || req.user.negocio_id) : req.user.negocio_id;
+    if (!targetId) return res.status(400).json({ error: 'Inicia sesión como Dueño o Cajero de un negocio.' });
+    const db = await getDatabaseConnection();
+    const neg = await db.get('SELECT * FROM negocios WHERE id = ?', [targetId]);
+    if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
+
+    if (req.body?.action === 'test') {
+        const subs = parseLocalPushSubs(neg);
+        if (subs.length === 0) return res.status(400).json({ error: 'Primero activa las alertas Push en este dispositivo.' });
+        const sent = await sendLocalWebPushForNegocio(db, neg, {
+            title: '💸 PRUEBA YAPE S/ 25.00',
+            body: `De: Cliente de Prueba • Cód: 842 (${neg.nombre_comercial})`,
+            monto: 25.0,
+            remitente: 'Cliente de Prueba',
+            codigo_seguridad: '842',
+            banco: 'YAPE',
+            tag: `yape-test-${Date.now()}`,
+            url: '/'
+        });
+        return res.json({ ok: true, sent, mensaje: `Notificación enviada a ${sent} dispositivo(s).` });
+    }
+
+    const sub = req.body?.subscription;
+    const endpoint = String(sub?.endpoint || '').trim();
+    const p256dh = String(sub?.keys?.p256dh || '').trim();
+    const auth = String(sub?.keys?.auth || '').trim();
+    const urlCheck = validateSafeWebhookUrl(endpoint);
+    if (!endpoint || !p256dh || !auth || !urlCheck.valid) {
+        return res.status(400).json({ error: 'Suscripción Push inválida o no segura' });
+    }
+
+    const list = parseLocalPushSubs(neg).filter((s) => s.endpoint !== urlCheck.url);
+    list.push({
+        endpoint: urlCheck.url,
+        keys: { p256dh, auth },
+        user: sanitizeText(req.user.username || '', 40),
+        rol: sanitizeText(req.user.rol || '', 20),
+        created_at: new Date().toISOString()
+    });
+    const trimmed = list.slice(-15);
+    await db.run('UPDATE negocios SET push_subscriptions = ? WHERE id = ?', [JSON.stringify(trimmed), targetId]);
+    return res.status(201).json({ ok: true, subscribedDevices: trimmed.length });
+});
+
+app.delete('/api/push', verifyJwtToken, async (req, res) => {
+    const targetId = req.user.rol === 'SUPERADMIN' ? (req.body?.negocio_id || req.user.negocio_id) : req.user.negocio_id;
+    if (!targetId) return res.status(400).json({ error: 'Negocio requerido' });
+    const endpoint = String(req.body?.endpoint || req.query?.endpoint || '').trim();
+    const db = await getDatabaseConnection();
+    const neg = await db.get('SELECT * FROM negocios WHERE id = ?', [targetId]);
+    if (!neg) return res.status(404).json({ error: 'Negocio no encontrado' });
+    const next = endpoint ? parseLocalPushSubs(neg).filter((s) => s.endpoint !== endpoint) : [];
+    await db.run('UPDATE negocios SET push_subscriptions = ? WHERE id = ?', [JSON.stringify(next), targetId]);
+    return res.json({ ok: true, subscribedDevices: next.length });
+});
+
+// ==========================================
 // 3. RECEPCIÓN Y GESTIÓN DE PAGOS (/api/pagos)
 // ==========================================
 app.post('/api/pagos', async (req, res) => {
@@ -934,6 +1073,21 @@ app.post('/api/pagos', async (req, res) => {
         if (targetNegocio && targetNegocio.webhook_url) {
             dispatchWebhookIfConfigured(targetNegocio, newPayment);
         }
+        if (targetNegocio) {
+            const montoStr = Number(newPayment.monto || 0).toFixed(2);
+            const codTxt = newPayment.codigo_seguridad ? ` • Cód: ${newPayment.codigo_seguridad}` : '';
+            sendLocalWebPushForNegocio(db, targetNegocio, {
+                title: `💸 ${bankName} RECIBIDO: S/ ${montoStr}`,
+                body: `De: ${newPayment.remitente}${codTxt}`,
+                id: newPayment.id,
+                monto: newPayment.monto,
+                remitente: newPayment.remitente,
+                codigo_seguridad: newPayment.codigo_seguridad,
+                banco: bankName,
+                tag: `pago-${newPayment.id || Date.now()}`,
+                url: '/'
+            }).catch(() => {});
+        }
 
         return res.status(201).json({ message: 'Pago registrado con éxito', pago: newPayment });
     } catch (error) {
@@ -1023,7 +1177,8 @@ app.get('/api/pagos', async (req, res, next) => {
             params.push(term, term, term);
         }
 
-        query += ' ORDER BY timestamp DESC LIMIT 500';
+        const maxRows = Math.max(1, Math.min(500, parseInt(req.query.limit || '500', 10) || 500));
+        query += ` ORDER BY timestamp DESC LIMIT ${maxRows}`;
         const pagos = await db.all(query, params);
 
         const targetNegForMeta = !isSuperAdmin ? req.user.negocio_id : (filterNegId && filterNegId !== 'MASTER' ? filterNegId : null);

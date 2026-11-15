@@ -1,15 +1,20 @@
 package com.minegocio.yapesensor
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +33,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -69,8 +75,11 @@ class MainActivity : ComponentActivity() {
         preferencesManager = PreferencesManager(applicationContext)
         repository = PaymentRepository(applicationContext)
 
-        rebindNotificationListener()
+        requestPostNotificationsIfNeeded()
         if (preferencesManager.getApiKey().isNotBlank()) {
+            rebindNotificationListener()
+        }
+        if (preferencesManager.hasActiveBackgroundWork()) {
             SensorKeepAliveService.start(applicationContext)
         }
 
@@ -89,8 +98,10 @@ class MainActivity : ComponentActivity() {
                         checkBatteryOptimizations = { isBatteryOptimizationIgnored(this) },
                         requestBatteryOptimizations = { requestIgnoreBatteryOptimization() },
                         rebindService = {
-                            rebindNotificationListener()
                             if (preferencesManager.getApiKey().isNotBlank()) {
+                                rebindNotificationListener()
+                            }
+                            if (preferencesManager.hasActiveBackgroundWork()) {
                                 SensorKeepAliveService.start(applicationContext)
                             }
                         }
@@ -102,9 +113,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        rebindNotificationListener()
         if (preferencesManager.getApiKey().isNotBlank()) {
+            rebindNotificationListener()
+        }
+        if (preferencesManager.hasActiveBackgroundWork()) {
             SensorKeepAliveService.start(applicationContext)
+        }
+    }
+
+    private fun requestPostNotificationsIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    1001
+                )
+            }
         }
     }
 
@@ -187,18 +216,30 @@ fun SensorSettingsScreen(
     var pairingLoading by remember { mutableStateOf(false) }
     var pairingCodeInput by remember { mutableStateOf("") }
 
+    var speakerLoading by remember { mutableStateOf(false) }
+    var speakerUserInput by remember { mutableStateOf("") }
+    var speakerPassInput by remember { mutableStateOf("") }
+
+    val activeMode by preferencesManager.appMode.collectAsState(initial = PreferencesManager.MODE_SENSOR)
     val savedUrl by preferencesManager.backendUrl.collectAsState(initial = PreferencesManager.DEFAULT_CLOUD_URL)
     val savedApiKey by preferencesManager.apiKey.collectAsState(initial = "")
     val savedBusinessName by preferencesManager.businessName.collectAsState(initial = "")
+    val savedSpeakerToken by preferencesManager.speakerToken.collectAsState(initial = "")
+    val savedSpeakerUser by preferencesManager.speakerUsername.collectAsState(initial = "")
+    val includeSender by preferencesManager.speakerIncludeSender.collectAsState(initial = true)
+
     val liveLogs by DiagnosticLogger.logs.collectAsState()
     val isServiceConnected by DiagnosticLogger.isServiceConnected.collectAsState()
 
     var urlInput by remember { mutableStateOf(PreferencesManager.DEFAULT_CLOUD_URL) }
     var apiKeyInput by remember { mutableStateOf("") }
 
-    LaunchedEffect(savedUrl, savedApiKey) {
+    LaunchedEffect(savedUrl, savedApiKey, savedSpeakerUser) {
         urlInput = savedUrl.ifBlank { PreferencesManager.DEFAULT_CLOUD_URL }
         apiKeyInput = savedApiKey
+        if (speakerUserInput.isBlank() && savedSpeakerUser.isNotBlank()) {
+            speakerUserInput = savedSpeakerUser
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -212,7 +253,7 @@ fun SensorSettingsScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Yape Sensor v2.0 • Blindado", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 17.sp)
+                        Text("Yape Sensor & Parlante v2.1", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 17.sp)
                         if (savedBusinessName.isNotBlank()) {
                             Text("Negocio: $savedBusinessName", color = Color(0xFFE1BEE7), fontSize = 12.sp)
                         }
@@ -230,65 +271,41 @@ fun SensorSettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Estado del Permiso Lector
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isPermissionGranted) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
-                )
+            // Selector Dual: MODO SENSOR (Dueño) vs MODO PARLANTE CAJA (Cajero / Bolsillo)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFEDE7F6), RoundedCornerShape(12.dp))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                val isSensorTab = activeMode != PreferencesManager.MODE_SPEAKER
+                Button(
+                    onClick = { preferencesManager.setAppMode(PreferencesManager.MODE_SENSOR) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(9.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isSensorTab) Color(0xFF740099) else Color.Transparent,
+                        contentColor = if (isSensorTab) Color.White else Color(0xFF4A148C)
+                    )
                 ) {
-                    Text(
-                        text = if (isPermissionGranted) "1. LECTOR DE NOTIFICACIONES ACTIVO" else "1. ACTIVAR PERMISO DE NOTIFICACIONES",
-                        fontWeight = FontWeight.Bold,
-                        color = if (isPermissionGranted) Color(0xFF2E7D32) else Color(0xFFC62828),
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (isPermissionGranted)
-                            if (isServiceConnected) "🟢 Escuchando apps oficiales (Yape, Plin, BBVA) con filtro antifraude."
-                            else "🟡 Permiso otorgado. Toca 'Re-activar' si no detecta."
-                        else
-                            "Otorga permiso para detectar únicamente notificaciones bancarias oficiales.",
-                        fontSize = 12.sp,
-                        color = Color.DarkGray
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                rebindService()
-                                openSettings()
-                                scope.launch {
-                                    delay(1000)
-                                    isPermissionGranted = checkPermission()
-                                    rebindService()
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
-                        ) {
-                            Text(if (isPermissionGranted) "Re-activar" else "Activar Lector", color = Color.White, fontSize = 12.sp)
-                        }
+                    Text("📱 Sensor Dueño", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
 
-                        OutlinedButton(
-                            onClick = { openAppDetails() },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Ajustes App", fontSize = 12.sp)
-                        }
-                    }
+                Button(
+                    onClick = { preferencesManager.setAppMode(PreferencesManager.MODE_SPEAKER) },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(9.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (!isSensorTab) Color(0xFF00897B) else Color.Transparent,
+                        contentColor = if (!isSensorTab) Color.White else Color(0xFF00695C)
+                    )
+                ) {
+                    Text("🔊 Parlante Caja", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
-            // 2. Batería Sin Restricciones
+            // Aviso común de Batería Sin Restricciones (garantiza funcionamiento con pantalla apagada)
             if (!isBatteryIgnored) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -299,14 +316,14 @@ fun SensorSettingsScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "2. EVITAR AHORRO DE BATERÍA (XIAOMI / SAMSUNG)",
+                            text = "⚡ PERMITIR FUNCIONAR CON PANTALLA APAGADA",
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFFF57F17),
                             fontSize = 13.sp
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Permite ejecución sin restricciones para que funcione con la pantalla apagada.",
+                            text = "Desactiva el ahorro de batería para que Xiaomi / Samsung / Motorola no corte el servicio en tu bolsillo.",
                             fontSize = 12.sp,
                             color = Color.DarkGray
                         )
@@ -327,150 +344,332 @@ fun SensorSettingsScreen(
                 }
             }
 
-            // 3. Vinculación Rápida por Código de 6 Dígitos (Recomendado)
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFF3E5F5))
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = if (savedApiKey.isNotBlank())
-                            "✅ CELULAR VINCULADO ${if (savedBusinessName.isNotBlank()) "A: $savedBusinessName" else ""}"
-                        else
-                            "⚡ VINCULAR RÁPIDO CON CÓDIGO DE 6 DÍGITOS",
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF4A148C),
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "En tu Panel Web abre 'Mi Negocio', genera tu código numérico de 6 dígitos e ingrésalo aquí:",
-                        fontSize = 12.sp,
-                        color = Color.DarkGray
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = pairingCodeInput,
-                            onValueChange = { raw ->
-                                pairingCodeInput = raw.filter { it.isDigit() }.take(6)
-                            },
-                            label = { Text("Código 6 dígitos") },
-                            placeholder = { Text("Ej: 482915") },
-                            modifier = Modifier.weight(1f),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true
+            if (activeMode == PreferencesManager.MODE_SPEAKER) {
+                // =============================================================
+                // PESTAÑA 2: MODO PARLANTE CAJA (VOZ CON PANTALLA APAGADA)
+                // =============================================================
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE0F2F1))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = if (savedSpeakerToken.isNotBlank())
+                                "🔊 PARLANTE CONECTADO (${savedSpeakerUser.uppercase()})"
+                            else
+                                "🔊 ACTIVAR PARLANTE DE BOLSILLO / CAJA",
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF00695C),
+                            fontSize = 14.sp
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Ingresa tu usuario y contraseña de CAJERO o DUEÑO. Este celular cantará en voz alta cada pago aunque tengas la pantalla bloqueada en el bolsillo (no requiere tener Yape instalado).",
+                            fontSize = 12.sp,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        Button(
-                            enabled = pairingCodeInput.length == 6 && !pairingLoading,
-                            onClick = {
-                                scope.launch {
-                                    pairingLoading = true
-                                    val result = repository.redeemPairingCode(urlInput, pairingCodeInput)
-                                    pairingLoading = false
-                                    if (result.success) {
-                                        pairingCodeInput = ""
-                                        SensorKeepAliveService.start(context)
-                                        repository.sendHeartbeat()
-                                        Toast.makeText(
-                                            context,
-                                            "¡Vinculado a ${result.businessName}!",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    } else {
-                                        Toast.makeText(context, result.errorMessage, Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B))
-                        ) {
-                            Text(if (pairingLoading) "..." else "Vincular", color = Color.White)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            enabled = savedApiKey.isNotBlank(),
-                            onClick = {
-                                scope.launch {
-                                    DiagnosticLogger.log("🧪 Enviando pago de prueba firmado...")
-                                    repository.saveAndUploadPayment(
-                                        remitente = "PRUEBA SENSOR V2",
-                                        monto = 1.00,
-                                        timestamp = System.currentTimeMillis(),
-                                        codigoSeguridad = "777",
-                                        banco = "YAPE",
-                                        packageName = "com.bcp.innovacxion.yapeapp"
-                                    )
-                                    repository.sendHeartbeat()
-                                    Toast.makeText(context, "Pago de prueba S/ 1.00 enviado", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        ) {
-                            Text("Probar Envío S/ 1.00", fontSize = 12.sp)
-                        }
-
-                        TextButton(onClick = { showAdvancedManual = !showAdvancedManual }) {
-                            Text(
-                                if (showAdvancedManual) "Ocultar modo manual" else "Configuración manual",
-                                fontSize = 12.sp,
-                                color = Color(0xFF740099)
-                            )
-                        }
-                    }
-
-                    if (showAdvancedManual) {
-                        Spacer(modifier = Modifier.height(6.dp))
                         OutlinedTextField(
-                            value = urlInput,
-                            onValueChange = { urlInput = it },
-                            label = { Text("URL del Servidor SaaS") },
-                            placeholder = { Text("https://yape-orcin.vercel.app") },
+                            value = speakerUserInput,
+                            onValueChange = { speakerUserInput = it },
+                            label = { Text("Usuario de Cajero o Dueño") },
+                            placeholder = { Text("Ej: polleria_caja") },
                             modifier = Modifier.fillMaxWidth(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             singleLine = true
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+
                         OutlinedTextField(
-                            value = apiKeyInput,
-                            onValueChange = { apiKeyInput = it },
-                            label = { Text("API Key Manual") },
-                            placeholder = { Text("yp_live_...") },
+                            value = speakerPassInput,
+                            onValueChange = { speakerPassInput = it },
+                            label = { Text("Contraseña") },
+                            placeholder = { Text("••••••••") },
                             modifier = Modifier.fillMaxWidth(),
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = includeSender,
+                                onCheckedChange = { preferencesManager.setSpeakerIncludeSender(it) }
+                            )
+                            Text("Mencionar nombre del cliente en voz alta", fontSize = 12.sp)
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
                         Button(
+                            enabled = !speakerLoading && speakerUserInput.isNotBlank() && speakerPassInput.isNotBlank(),
                             onClick = {
                                 scope.launch {
-                                    preferencesManager.saveSettings(urlInput, apiKeyInput)
-                                    SensorKeepAliveService.start(context)
-                                    repository.sendHeartbeat()
-                                    Toast.makeText(context, "Configuración manual guardada", Toast.LENGTH_SHORT).show()
+                                    speakerLoading = true
+                                    val res = repository.loginCashierSpeaker(
+                                        serverUrlInput = urlInput,
+                                        usernameInput = speakerUserInput,
+                                        passwordInput = speakerPassInput
+                                    )
+                                    speakerLoading = false
+                                    if (res.success) {
+                                        speakerPassInput = ""
+                                        SensorKeepAliveService.start(context)
+                                        Toast.makeText(
+                                            context,
+                                            "¡Parlante activo para ${res.businessName}! Puedes bloquear tu pantalla.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(context, res.errorMessage, Toast.LENGTH_LONG).show()
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B))
                         ) {
-                            Text("Guardar Manualmente", color = Color.White)
+                            Text(
+                                if (speakerLoading) "Conectando..." else "Conectar Parlante de Caja",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    SensorKeepAliveService.testSpeakerVoice(context)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("▶ Probar Voz S/ 35.50", fontSize = 12.sp)
+                            }
+
+                            if (savedSpeakerToken.isNotBlank()) {
+                                OutlinedButton(
+                                    onClick = {
+                                        preferencesManager.clearSpeakerSession()
+                                        Toast.makeText(context, "Parlante desconectado", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Cerrar Sesión", fontSize = 12.sp, color = Color(0xFFC62828))
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // =============================================================
+                // PESTAÑA 1: MODO SENSOR RECEPTOR (CELULAR CON YAPE / PLIN / BBVA)
+                // =============================================================
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isPermissionGranted) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = if (isPermissionGranted) "1. LECTOR DE NOTIFICACIONES ACTIVO" else "1. ACTIVAR PERMISO DE NOTIFICACIONES",
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPermissionGranted) Color(0xFF2E7D32) else Color(0xFFC62828),
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (isPermissionGranted)
+                                if (isServiceConnected) "🟢 Escuchando apps oficiales (Yape, Plin, BBVA) con filtro antifraude."
+                                else "🟡 Permiso otorgado. Toca 'Re-activar' si no detecta."
+                            else
+                                "Otorga permiso en el celular donde están instalados Yape / Plin / BBVA.",
+                            fontSize = 12.sp,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    rebindService()
+                                    openSettings()
+                                    scope.launch {
+                                        delay(1000)
+                                        isPermissionGranted = checkPermission()
+                                        rebindService()
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
+                            ) {
+                                Text(if (isPermissionGranted) "Re-activar" else "Activar Lector", color = Color.White, fontSize = 12.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = { openAppDetails() },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Ajustes App", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                // Vinculación Rápida por Código de 6 Dígitos
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF3E5F5))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = if (savedApiKey.isNotBlank())
+                                "✅ CELULAR VINCULADO ${if (savedBusinessName.isNotBlank()) "A: $savedBusinessName" else ""}"
+                            else
+                                "⚡ VINCULAR RÁPIDO CON CÓDIGO DE 6 DÍGITOS",
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF4A148C),
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "En tu Panel Web abre 'Mi Negocio', genera tu código numérico de 6 dígitos e ingrésalo aquí:",
+                            fontSize = 12.sp,
+                            color = Color.DarkGray
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = pairingCodeInput,
+                                onValueChange = { raw ->
+                                    pairingCodeInput = raw.filter { it.isDigit() }.take(6)
+                                },
+                                label = { Text("Código 6 dígitos") },
+                                placeholder = { Text("Ej: 482915") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true
+                            )
+
+                            Button(
+                                enabled = pairingCodeInput.length == 6 && !pairingLoading,
+                                onClick = {
+                                    scope.launch {
+                                        pairingLoading = true
+                                        val result = repository.redeemPairingCode(urlInput, pairingCodeInput)
+                                        pairingLoading = false
+                                        if (result.success) {
+                                            pairingCodeInput = ""
+                                            SensorKeepAliveService.start(context)
+                                            repository.sendHeartbeat()
+                                            Toast.makeText(
+                                                context,
+                                                "¡Vinculado a ${result.businessName}!",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(context, result.errorMessage, Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B))
+                            ) {
+                                Text(if (pairingLoading) "..." else "Vincular", color = Color.White)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                enabled = savedApiKey.isNotBlank(),
+                                onClick = {
+                                    scope.launch {
+                                        DiagnosticLogger.log("🧪 Enviando pago de prueba firmado...")
+                                        repository.saveAndUploadPayment(
+                                            remitente = "PRUEBA SENSOR V2",
+                                            monto = 1.00,
+                                            timestamp = System.currentTimeMillis(),
+                                            codigoSeguridad = "777",
+                                            banco = "YAPE",
+                                            packageName = "com.bcp.innovacxion.yapeapp"
+                                        )
+                                        repository.sendHeartbeat()
+                                        Toast.makeText(context, "Pago de prueba S/ 1.00 enviado", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            ) {
+                                Text("Probar Envío S/ 1.00", fontSize = 12.sp)
+                            }
+
+                            TextButton(onClick = { showAdvancedManual = !showAdvancedManual }) {
+                                Text(
+                                    if (showAdvancedManual) "Ocultar modo manual" else "Configuración manual",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF740099)
+                                )
+                            }
+                        }
+
+                        if (showAdvancedManual) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = urlInput,
+                                onValueChange = { urlInput = it },
+                                label = { Text("URL del Servidor SaaS") },
+                                placeholder = { Text("https://yape-orcin.vercel.app") },
+                                modifier = Modifier.fillMaxWidth(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = apiKeyInput,
+                                onValueChange = { apiKeyInput = it },
+                                label = { Text("API Key Manual") },
+                                placeholder = { Text("yp_live_...") },
+                                modifier = Modifier.fillMaxWidth(),
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        preferencesManager.saveSettings(urlInput, apiKeyInput)
+                                        SensorKeepAliveService.start(context)
+                                        repository.sendHeartbeat()
+                                        Toast.makeText(context, "Configuración manual guardada", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF740099))
+                            ) {
+                                Text("Guardar Manualmente", color = Color.White)
+                            }
                         }
                     }
                 }
             }
 
-            // 4. Consola de Diagnóstico en Vivo
+            // Consola de Diagnóstico en Vivo
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
@@ -482,7 +681,7 @@ fun SensorSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "📋 MONITOR ANTIFRAUDE EN VIVO",
+                            text = "📋 REGISTRO EN VIVO",
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF81C784),
                             fontSize = 12.sp
@@ -498,13 +697,16 @@ fun SensorSettingsScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(170.dp)
+                            .height(150.dp)
                             .background(Color(0xFF121212), RoundedCornerShape(4.dp))
                             .padding(8.dp)
                     ) {
                         if (liveLogs.isEmpty()) {
                             Text(
-                                text = "Sensor v2.0 activo.\nEsperando notificaciones oficiales de Yape, Plin o BBVA...",
+                                text = if (activeMode == PreferencesManager.MODE_SPEAKER)
+                                    "Modo Parlante listo.\nEsperando pagos entrantes para anunciarlos en voz alta..."
+                                else
+                                    "Modo Sensor listo.\nEsperando notificaciones oficiales de Yape, Plin o BBVA...",
                                 color = Color.Gray,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace
@@ -520,7 +722,7 @@ fun SensorSettingsScreen(
                                     Text(
                                         text = logLine,
                                         color = if (logLine.contains("ERROR") || logLine.contains("❌") || logLine.contains("🛡️")) Color(0xFFFF8A80)
-                                                else if (logLine.contains("ÉXITO") || logLine.contains("✅") || logLine.contains("🚀") || logLine.contains("💰")) Color(0xFFB9F6CA)
+                                                else if (logLine.contains("ÉXITO") || logLine.contains("✅") || logLine.contains("🚀") || logLine.contains("🔊")) Color(0xFFB9F6CA)
                                                 else Color(0xFFE0E0E0),
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,

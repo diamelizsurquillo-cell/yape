@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import net from 'net';
 import WebSocket from 'ws';
+import * as webpush from 'web-push';
 import { createClient } from '@supabase/supabase-js';
 
 // Rate limiter en memoria por instancia Serverless / Node
@@ -410,6 +411,7 @@ export function extractSensorMeta(negocio) {
 
 export async function updateSensorMetaInSupabase(supabase, negocio, patch) {
   const current = extractSensorMeta(negocio);
+  const existingPushSubs = extractPushSubscriptions(negocio);
   const merged = {
     pairing_code: patch.pairing_code !== undefined ? patch.pairing_code : current.pairing_code,
     pairing_expires_at:
@@ -430,13 +432,14 @@ export async function updateSensorMetaInSupabase(supabase, negocio, patch) {
 
   if (!error) return { ok: true };
 
-  // Fallback automático en telegram_chat_id si el usuario aún no corrió supabase_device_pairing_migration.sql
+  // Fallback automático en telegram_chat_id preservando suscripciones Web Push activas
   const compactFallback = JSON.stringify({
     pair: merged.pairing_code,
     exp: merged.pairing_expires_at,
     seen: merged.sensor_last_seen,
     bat: merged.sensor_battery,
-    dev: merged.sensor_device_name
+    dev: merged.sensor_device_name,
+    ...(existingPushSubs.length > 0 ? { push_subs: existingPushSubs } : {})
   });
 
   const retry = await supabase
@@ -445,6 +448,155 @@ export async function updateSensorMetaInSupabase(supabase, negocio, patch) {
     .eq('id', negocio.id);
 
   return { ok: !retry.error, error: retry.error };
+}
+
+// =========================================================================
+// WEB PUSH (VAPID) CON APP CERRADA / PANTALLA BLOQUEADA (ZERO-CONFIG)
+// =========================================================================
+let cachedVapidKeys = null;
+
+export function getVapidKeys() {
+  if (cachedVapidKeys) return cachedVapidKeys;
+
+  const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  if (envPub && envPriv) {
+    cachedVapidKeys = { publicKey: envPub, privateKey: envPriv };
+    return cachedVapidKeys;
+  }
+
+  // Derivación determinística P-256 (prime256v1) desde el secreto del servidor (0 configuración extra en Vercel)
+  const seed = crypto
+    .createHmac('sha256', getJwtSecret())
+    .update('yape-saas-webpush-vapid-p256-v1')
+    .digest();
+  // Asegurar 1 <= d < orden de prime256v1 (limpiar bit más significativo garantiza d < 2^255 < n)
+  const privBuf = Buffer.from(seed);
+  privBuf[0] = (privBuf[0] & 0x7f) | 0x01;
+
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.setPrivateKey(privBuf);
+  const pubBuf = ecdh.getPublicKey(); // 65 bytes sin comprimir (0x04 || X || Y)
+
+  cachedVapidKeys = {
+    publicKey: pubBuf.toString('base64url'),
+    privateKey: privBuf.toString('base64url')
+  };
+  return cachedVapidKeys;
+}
+
+export function validatePushSubscriptionObject(sub) {
+  if (!sub || typeof sub !== 'object') return { valid: false, error: 'Suscripción Push vacía' };
+  const endpoint = String(sub.endpoint || '').trim();
+  const p256dh = String(sub.keys?.p256dh || '').trim();
+  const auth = String(sub.keys?.auth || '').trim();
+
+  if (!endpoint || !p256dh || !auth) {
+    return { valid: false, error: 'Faltan llaves criptográficas p256dh/auth en la suscripción Push' };
+  }
+
+  const safeCheck = validateSafeWebhookUrl(endpoint);
+  if (!safeCheck.valid) {
+    return { valid: false, error: 'Endpoint Push rechazado por seguridad' };
+  }
+
+  return {
+    valid: true,
+    subscription: {
+      endpoint: safeCheck.url,
+      keys: { p256dh, auth }
+    }
+  };
+}
+
+export function extractPushSubscriptions(negocio) {
+  if (!negocio) return [];
+  if (Array.isArray(negocio.push_subscriptions)) {
+    return negocio.push_subscriptions;
+  }
+  if (typeof negocio.push_subscriptions === 'string' && negocio.push_subscriptions.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(negocio.push_subscriptions);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // continuar al sobre JSON de telegram_chat_id
+    }
+  }
+
+  const rawTg = String(negocio.telegram_chat_id || '');
+  if (rawTg.startsWith('{') && rawTg.endsWith('}')) {
+    try {
+      const envelope = JSON.parse(rawTg);
+      if (Array.isArray(envelope.push_subs)) return envelope.push_subs;
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+export async function savePushSubscriptionsInSupabase(supabase, negocio, subsList) {
+  const cleanList = (subsList || []).slice(-15); // Máximo 15 dispositivos activos por negocio
+  let envelope = {};
+  const rawTg = String(negocio?.telegram_chat_id || '');
+  if (rawTg.startsWith('{') && rawTg.endsWith('}')) {
+    try {
+      envelope = JSON.parse(rawTg);
+    } catch {
+      envelope = {};
+    }
+  }
+  envelope.push_subs = cleanList;
+
+  const { error } = await supabase
+    .from('negocios')
+    .update({ telegram_chat_id: JSON.stringify(envelope) })
+    .eq('id', negocio.id);
+
+  return { ok: !error, error };
+}
+
+export async function dispatchWebPushToSubs(subsList, payloadObj) {
+  if (!Array.isArray(subsList) || subsList.length === 0) {
+    return { sentCount: 0, validSubs: [], pruned: false };
+  }
+
+  const { publicKey, privateKey } = getVapidKeys();
+  const subject = (process.env.VAPID_SUBJECT || 'mailto:soporte@yape-monitor.pe').trim();
+  webpush.setVapidDetails(subject, publicKey, privateKey);
+
+  const bodyStr = JSON.stringify(payloadObj);
+  const validSubs = [];
+  let sentCount = 0;
+  let pruned = false;
+
+  await Promise.all(
+    subsList.map(async (item) => {
+      const check = validatePushSubscriptionObject(item);
+      if (!check.valid) {
+        pruned = true;
+        return;
+      }
+      try {
+        await webpush.sendNotification(check.subscription, bodyStr, {
+          TTL: 180,
+          urgency: 'high'
+        });
+        sentCount++;
+        validSubs.push(item);
+      } catch (err) {
+        const status = err?.statusCode || 0;
+        if (status === 404 || status === 410) {
+          // Suscripción revocada o desinstalada en el celular -> limpiar automáticamente
+          pruned = true;
+        } else {
+          validSubs.push(item);
+        }
+      }
+    })
+  );
+
+  return { sentCount, validSubs, pruned };
 }
 
 export function sanitizeText(str, maxLength = 100) {

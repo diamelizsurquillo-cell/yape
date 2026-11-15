@@ -10,7 +10,10 @@ import {
   checkRateLimit,
   verifySensorHmac,
   extractSensorMeta,
-  updateSensorMetaInSupabase
+  updateSensorMetaInSupabase,
+  extractPushSubscriptions,
+  savePushSubscriptionsInSupabase,
+  dispatchWebPushToSubs
 } from './_utils.js';
 
 function enrichBankField(p) {
@@ -264,6 +267,31 @@ export default async function handler(req, res) {
       if (targetNegocio.webhook_url) {
         await dispatchWebhookIfConfigured(targetNegocio, finalPago);
       }
+
+      // Enviar Notificación Web Push instantánea a Cajeros/Dueño aunque tengan la App PWA cerrada o pantalla bloqueada
+      const pushSubs = extractPushSubscriptions(targetNegocio);
+      if (pushSubs.length > 0) {
+        try {
+          const montoStr = Number(finalPago.monto || 0).toFixed(2);
+          const codTxt = finalPago.codigo_seguridad ? ` • Cód: ${finalPago.codigo_seguridad}` : '';
+          const pushRes = await dispatchWebPushToSubs(pushSubs, {
+            title: `💸 ${bankName} RECIBIDO: S/ ${montoStr}`,
+            body: `De: ${finalPago.remitente}${codTxt}`,
+            id: finalPago.id,
+            monto: finalPago.monto,
+            remitente: finalPago.remitente,
+            codigo_seguridad: finalPago.codigo_seguridad,
+            banco: bankName,
+            tag: `pago-${finalPago.id || Date.now()}`,
+            url: '/'
+          });
+          if (pushRes.pruned) {
+            await savePushSubscriptionsInSupabase(supabase, targetNegocio, pushRes.validSubs);
+          }
+        } catch (pushErr) {
+          console.warn('Error enviando Web Push:', pushErr.message);
+        }
+      }
     }
 
     return res.status(201).json({
@@ -374,9 +402,10 @@ export default async function handler(req, res) {
   // 2. LISTAR PAGOS AISLADOS POR NEGOCIO Y ROL
   // =========================================================================
   if (req.method === 'GET') {
-    const { negocio_id: filterNegocioId, validado, search, fecha_inicio, fecha_fin } = req.query || {};
+    const { negocio_id: filterNegocioId, validado, search, fecha_inicio, fecha_fin, limit } = req.query || {};
+    const maxRows = Math.max(1, Math.min(500, parseInt(limit || '500', 10) || 500));
 
-    let query = supabase.from('pagos').select('*').order('timestamp', { ascending: false }).limit(500);
+    let query = supabase.from('pagos').select('*').order('timestamp', { ascending: false }).limit(maxRows);
 
     if (!isSuperAdmin) {
       query = query.eq('negocio_id', authUser.negocio_id);
